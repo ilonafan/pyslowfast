@@ -16,7 +16,6 @@ from torchvision import transforms
 
 from .rand_augment import rand_augment_transform
 from .random_erasing import RandomErasing
-from randaugment import RandAugment
 
 _pil_interpolation_to_str = {
     Image.NEAREST: "PIL.Image.NEAREST",
