@@ -116,8 +116,10 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
                 yd_transform.view(batchSize, -1, 1),
             )
             preds = torch.sum(probs, 1)
-        elif cfg.MODEL.MODEL_NAME == 'MVIT_PNP':
-            preds = model(inputs)['logits']    
+        elif cfg.TRAIN.DATASET == 'rrl':
+            preds, feat_lowD, feat = model(inputs)
+        elif cfg.TASK == "TSNE":
+            preds, feat = model(inputs)
         else:
             # Perform the forward pass.
             preds = model(inputs)
@@ -125,79 +127,106 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
         if cfg.NUM_GPUS > 1:
             preds, labels, video_idx = du.all_gather([preds, labels, video_idx])
         if cfg.NUM_GPUS:
-            preds = preds.cpu()
+            preds = preds.cpu() 
             labels = labels.cpu()
             video_idx = video_idx.cpu()
-
+        if cfg.NUM_GPUS and (cfg.TRAIN.DATASET == 'rrl' or cfg.TASK == "TSNE"):
+            feat = feat.cpu()
+        if cfg.NUM_GPUS and cfg.TRAIN.DATASET == 'rrl':
+            feat_lowD = feat_lowD.cpu()
         test_meter.iter_toc()
         
         
         # Visualize the resultant embeddings with t-sne 
-        if cfg.TASK == 'TSNE':
+        if cfg.TASK == 'TSNE' and cfg.TRAIN.DATASET == 'rrl':
             # Update and log embeddings.
-            test_meter.update_embeddings(
-                preds.detach(), labels.detach(), video_idx.detach()
+            test_meter.update_embeddings_rrl(
+                preds.detach(), feat.detach(), feat_lowD.detach(), labels.detach(), video_idx.detach()
             )
-            # print("preds shape", preds.shape)
-            # print("labels shape", labels.shape)
-            # print("video_idx shape", video_idx.shape) 
+        elif cfg.TASK == 'TSNE':
+            test_meter.update_embeddings(
+                preds.detach(), feat.detach(), labels.detach(), video_idx.detach()
+            )
         elif not cfg.VIS_MASK.ENABLE:
             # Update and log stats.
             test_meter.update_stats(
                 preds.detach(), labels.detach(), video_idx.detach()
             )
         test_meter.log_iter_stats(cur_iter)
-
         test_meter.iter_tic()
+    
+    if cfg.TASK == 'TSNE' and cfg.TRAIN.DATASET == 'rrl':
+        all_embeddings = test_meter.embeddings.clone().detach()
+        all_embeddings_lowD = test_meter.embeddings_lowD.clone().detach()
+        all_labels = test_meter.video_labels
+        
+        if cfg.NUM_GPUS:
+            all_embeddings = all_embeddings.cpu()
+            all_embeddings_lowD = all_embeddings_lowD.cpu()
+            all_labels = all_labels.cpu()
 
-    if cfg.TASK == 'TSNE':
-            all_embeddings = test_meter.embeddings.clone().detach()
-            all_labels = test_meter.video_labels
+        if cfg.TEST.SAVE_RESULTS_PATH != "":
+            save_path = os.path.join(cfg.OUTPUT_DIR, "embeddings.csv")
+            save_path_low = os.path.join(cfg.OUTPUT_DIR, "embeddings_lowD.csv")
+
+        if du.is_root_proc():
+            res = torch.hstack((all_embeddings, all_labels.unsqueeze(1)))
+            res_lowD = torch.hstack((all_embeddings_lowD, all_labels.unsqueeze(1)))
+            emb_list = res.tolist()
+            emb_lowD_list = res_lowD.tolist()
             
-            if cfg.NUM_GPUS:
-                all_embeddings = all_embeddings.cpu()
-                all_labels = all_labels.cpu()
+            with open(save_path, 'w', newline='') as file:
+                csv_writer = csv.writer(file)
+                for emb in emb_list:
+                    csv_writer.writerow(emb)
+            with open(save_path_low, 'w', newline='') as file:
+                csv_writer = csv.writer(file)
+                for emb_low in emb_lowD_list:
+                    csv_writer.writerow(emb_low)
+        logger.info(
+            "Successfully saved resultant embeddings to {} and {}".format(save_path, save_path_low)
+        )   
+    elif cfg.TASK == 'TSNE':
+        all_embeddings = test_meter.embeddings.clone().detach()
+        all_labels = test_meter.video_labels
+        
+        if cfg.NUM_GPUS:
+            all_embeddings = all_embeddings.cpu()
+            all_labels = all_labels.cpu()
 
-            if cfg.TEST.SAVE_RESULTS_PATH != "":
-                save_path = os.path.join(cfg.OUTPUT_DIR, cfg.TEST.SAVE_RESULTS_PATH)
+        if cfg.TEST.SAVE_RESULTS_PATH != "":
+            save_path = os.path.join(cfg.OUTPUT_DIR, "embeddings.csv")
 
-            if du.is_root_proc():
-                print('embedding shape is: ', all_embeddings.shape)
-                print('labels shape is: ', all_labels.shape)
-                # res = torch.cat((all_embeddings, all_labels), 1)
-                res = torch.hstack((all_embeddings, all_labels.unsqueeze(1)))
-                print('res shape is: ', res.shape)
-                emb_list = res.tolist()
-                print('list length is: ', len(emb_list))
+        if du.is_root_proc():
+            res = torch.hstack((all_embeddings, all_labels.unsqueeze(1)))
+            emb_list = res.tolist()
 
-                with open(save_path, 'w', newline='') as file:
-                    writer = csv.writer(file)
-                    for emb in emb_list:
-                        writer.writerow(emb)
-            logger.info(
-                "Successfully saved resultant embeddings to {}".format(save_path)
-            )   
+            with open(save_path, 'w', newline='') as file:
+                csv_writer = csv.writer(file)
+                for emb in emb_list:
+                    csv_writer.writerow(emb)
+        logger.info(
+            "Successfully saved resultant embeddings to {}".format(save_path)
+        )   
 
     # Log epoch stats and print the final testing results.
-    elif not cfg.DETECTION.ENABLE:    
+    if not cfg.DETECTION.ENABLE and cfg.TASK != "TSNE":    
         all_preds = test_meter.video_preds.clone().detach()
         all_labels = test_meter.video_labels
         if cfg.NUM_GPUS:
             all_preds = all_preds.cpu()
             all_labels = all_labels.cpu()
         if writer is not None:
-            writer.plot_eval(preds=all_preds, labels=all_labels)
+            writer.plot_eval(preds=all_preds, labels=all_labels)      
+        save_path = os.path.join(cfg.OUTPUT_DIR, "test_pred.dat")
 
-        if cfg.TEST.SAVE_RESULTS_PATH != "":
-            save_path = os.path.join(cfg.OUTPUT_DIR, cfg.TEST.SAVE_RESULTS_PATH)
+        if du.is_root_proc():
+            with pathmgr.open(save_path, "wb") as f:
+                pickle.dump([all_preds, all_labels], f)
 
-            if du.is_root_proc():
-                with pathmgr.open(save_path, "wb") as f:
-                    pickle.dump([all_preds, all_labels], f)
-
-            logger.info(
-                "Successfully saved prediction results to {}".format(save_path)
-            )
+        logger.info(
+            "Successfully saved prediction results to {}".format(save_path)
+        )
             
         test_meter.finalize_metrics()
     return test_meter
@@ -228,8 +257,8 @@ def test(cfg):
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
         # Print config.
-        logger.info("Test with config:")
-        logger.info(cfg)
+        # logger.info("Test with config:")
+        # logger.info(cfg)
 
         # Build the video model and print model statistics.
         model = build_model(cfg)
@@ -256,7 +285,7 @@ def test(cfg):
         cu.load_test_checkpoint(cfg, model)
 
         # Create video testing loaders.
-        test_loader = loader.construct_loader(cfg, "test")
+        test_loader = loader.construct_loader(cfg, "test")  
         logger.info("Testing model for {} iterations".format(len(test_loader)))
 
         if cfg.DETECTION.ENABLE:
@@ -277,6 +306,7 @@ def test(cfg):
                 if not cfg.TASK == "ssl"
                 else cfg.CONTRASTIVE.NUM_CLASSES_DOWNSTREAM,
                 len(test_loader),
+                cfg.MODEL.MODEL_NAME,
                 cfg.DATA.MULTI_LABEL,
                 cfg.DATA.ENSEMBLE_METHOD,
             )
