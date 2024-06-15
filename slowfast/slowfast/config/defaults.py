@@ -415,10 +415,6 @@ _C.MODEL.OMEGA = 0.1
 # Subtract loss of ood from consistency loss
 _C.MODEL.NEG_CONS = True
 
-#Hyperparameter of early learning regularization method
-_C.MODEL.LAM = 3
-_C.MODEL.BETA = 0.7
-
 # Model architectures that has one single pathway.
 _C.MODEL.SINGLE_PATHWAY_ARCH = [
     "2d",
@@ -460,21 +456,55 @@ _C.MODEL.FROZEN_BN = False
 _C.MODEL.FP16_ALLREDUCE = False
 
 # -----------------------------------------------------------------------------
-# Early Learning Regilarization Plus options
+# Early Learning Regilarization options
 # -----------------------------------------------------------------------------
 # Hyperparameter for mixup augmentation
-_C.ELR_PLUS = CfgNode()
+_C.ELR = CfgNode()
 
-_C.ELR_PLUS.ALPHA = 1.0
+_C.ELR.ALPHA = 1.0
 
 # Hyperparameter for weight averaging
-_C.ELR_PLUS.GAMMA = 0.997
+_C.ELR.GAMMA = 0.997
 
 # Hyperparameter for temporal ensembling
-_C.ELR_PLUS.BETA = 0.7
+_C.ELR.BETA = 0.7
 
 # Hyperparameter for regularization
-_C.ELR_PLUS.LAM = 3
+_C.ELR.LAM = 3
+
+# ---------------------------------------------------------------------------- #
+# Clustering-friendly representation learning options
+# ---------------------------------------------------------------------------- #
+
+# Clustering algorithm for CRL method.
+_C.CLUSTER = "kmeans"
+
+# Sample selection method.
+_C.SAMPLE_SELECTION = "soft_label"
+
+# Temperature scaling parameter for contrastive loss.
+_C.TAU1 = 0.3 
+
+# Temperature scaling parameter for instance discrimination loss.
+_C.TAU2 = 0.5
+
+# Temperature scaling parameter for feature decorrelation loss.
+_C.TAU3 = 2.0
+
+# Noise ratio.
+_C.NOISE_PROP = 0.5
+
+# Weight of L2 loss on noisy subset
+_C.LAM_U = 50
+
+# Hyperparameter for class weight.
+_C.LAM = 0.0
+
+# Hyperparemeter for co-refinement within cluster.
+_C.BETA = 0.5
+
+# Hyperparemeter for beta distrubution for mixup augmentation.
+_C.ALPHA = 8
 
 # -----------------------------------------------------------------------------
 # MViT options
