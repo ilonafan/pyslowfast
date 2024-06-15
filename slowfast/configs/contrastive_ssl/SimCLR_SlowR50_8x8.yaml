@@ -46,7 +46,7 @@ BN:
   # NORM_TYPE: "sync_batchnorm_apex"
 SOLVER:
   BASE_LR: 0.6
-  BASE_LR: 1.2
+  # BASE_LR: 1.2
 
   LARS_ON: True
   BASE_LR_SCALE_NUM_SHARDS: True
