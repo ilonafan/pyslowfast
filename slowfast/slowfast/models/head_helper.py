@@ -15,6 +15,8 @@ from slowfast.models.batchnorm_helper import (
 )
 from slowfast.models.nonlocal_helper import Nonlocal
 
+import torch.nn.functional as F
+
 logger = logging.get_logger(__name__)
 
 
@@ -291,7 +293,20 @@ class ResNetBasicHead(nn.Module):
                 "{} is not supported as an activation"
                 "function.".format(act_func)
             )
-
+        
+        # For RRL dataset
+        self.use_fc = False
+        if cfg.TRAIN.DATASET == "rrl":
+            self.use_fc = True
+            self.fc = nn.Linear(sum(dim_in), 48)
+            nn.init.xavier_normal_(self.fc.weight.data)
+            nn.init.constant_(self.fc.bias.data, val=0)
+            
+            self.l2norm = Normalize(2)
+            self.recon = nn.Linear(48, sum(dim_in))
+            nn.init.xavier_normal_(self.recon.weight.data)
+            nn.init.constant_(self.recon.bias.data, val=0)
+        
         if cfg.CONTRASTIVE.PREDICTOR_DEPTHS:
             d_in = num_classes
             for i, n_layers in enumerate(cfg.CONTRASTIVE.PREDICTOR_DEPTHS):
@@ -335,6 +350,17 @@ class ResNetBasicHead(nn.Module):
             and self.cfg.MODEL.MODEL_NAME == "ContrastiveModel"
         ):
             x = x.view(x.shape[0], -1)
+        
+        # For RRL dataset
+        if self.use_fc:
+            # feat = x.view(x.shape[0], -1)
+            # feat_lowD = self.fc(feat)
+            feat_lowD = self.fc(x)
+            
+            recon = F.relu(self.recon(feat_lowD))
+            error = torch.mean((recon-x)**2,dim=1)              
+            
+            feat_lowD = self.l2norm(feat_lowD)    
 
         x_proj = self.projection(x)
 
@@ -353,7 +379,10 @@ class ResNetBasicHead(nn.Module):
 
         x_proj = x_proj.view(x_proj.shape[0], -1)
 
-        if time_projs:
+        
+        if self.use_fc:
+            return x_proj, feat_lowD, error
+        elif time_projs:
             return [x_proj] + time_projs
         else:
             return x_proj
@@ -382,6 +411,8 @@ class X3DHead(nn.Module):
         bn_mmt=0.1,
         norm_module=nn.BatchNorm3d,
         bn_lin5_on=False,
+        use_fc=False,
+        embeddings=False,
     ):
         """
         The `__init__` method of any subclass should also contain these
@@ -416,6 +447,20 @@ class X3DHead(nn.Module):
         self.bn_mmt = bn_mmt
         self.inplace_relu = inplace_relu
         self.bn_lin5_on = bn_lin5_on
+        
+        # For RRl dataset
+        self.use_fc = use_fc
+        self.embeddings = embeddings
+        if use_fc:
+            self.fc = nn.Linear(dim_out, 48)
+            nn.init.xavier_normal_(self.fc.weight.data)
+            nn.init.constant_(self.fc.bias.data, val=0)
+            
+            self.l2norm = Normalize(2)
+            self.recon = nn.Linear(48, dim_out)
+            nn.init.xavier_normal_(self.recon.weight.data)
+            nn.init.constant_(self.recon.bias.data, val=0)
+        
         self._construct_head(dim_in, dim_inner, dim_out, norm_module)
 
     def _construct_head(self, dim_in, dim_inner, dim_out, norm_module):
@@ -488,16 +533,35 @@ class X3DHead(nn.Module):
         # Perform dropout.
         if hasattr(self, "dropout"):
             x = self.dropout(x)
+        
+        if self.use_fc:
+            feat = x.view(x.shape[0], -1)
+            feat_lowD = self.fc(feat)
+            # feat_lowD = self.fc(x)
+            
+            recon = F.relu(self.recon(feat_lowD))
+            error = torch.mean((recon-x)**2,dim=1)              
+            
+            feat_lowD = self.l2norm(feat_lowD)    
+        
+        if not self.training and self.embeddings and not self.use_fc:
+            return x, x.view(x.shape[0], -1)
+        elif not self.training and self.embeddings:
+            error = x.view(x.shape[0], -1)
+        
         x = self.projection(x)
 
-        # Performs fully convlutional inference.
+        # Performs fully convolutional inference.
         if not self.training:
             x = self.act(x)
             x = x.mean([1, 2, 3])
 
         x = x.view(x.shape[0], -1)
-        return x
-
+        
+        if self.use_fc:
+            return x, feat_lowD, error
+        else:
+            return x
 
 class TransformerBasicHead(nn.Module):
     """
@@ -557,12 +621,42 @@ class TransformerBasicHead(nn.Module):
                 "{} is not supported as an activation"
                 "function.".format(act_func)
             )
+        
+        if cfg.TRAIN.DATASET == "rrl":
+            self.use_fc = True
+            self.fc = nn.Linear(dim_in, 48)
+            nn.init.xavier_normal_(self.fc.weight.data)
+            nn.init.constant_(self.fc.bias.data, val=0)
+            
+            self.l2norm = Normalize(2)
+            self.recon = nn.Linear(48, dim_in)
+            nn.init.xavier_normal_(self.recon.weight.data)
+            nn.init.constant_(self.recon.bias.data, val=0)
+            
+        self.embeddings = False
+        if cfg.TASK == "TSNE":
+            self.embeddings = True
 
     def forward(self, x):
         if hasattr(self, "dropout"):
             x = self.dropout(x)
         if self.detach_final_fc:
             x = x.detach()
+        
+        if self.use_fc:
+            feat_lowD = self.fc(x)
+            
+            recon = F.relu(self.recon(feat_lowD))
+            error = torch.mean((recon-x)**2,dim=1)              
+            
+            # Perform l2norm for RRL method
+            feat_lowD = self.l2norm(feat_lowD) 
+        
+        if not self.training and self.embeddings and not self.use_fc:
+            return x, x.view(x.shape[0], -1)
+        elif not self.training and self.embeddings:
+            error = x.view(x.shape[0], -1)
+        
         x = self.projection(x)
 
         if not self.training:
@@ -573,9 +667,21 @@ class TransformerBasicHead(nn.Module):
                 x = x.mean([1, 2, 3])
 
         x = x.view(x.shape[0], -1)
+        
+        if self.use_fc:
+            return x, feat_lowD, error
+        else:
+            return x
 
-        return x
+class Normalize(nn.Module):
+    def __init__(self, power=2):
+        super(Normalize, self).__init__()
+        self.power = power
 
+    def forward(self, x):
+        norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
+        out = x.div(norm)
+        return out
 
 class MSSeparateHead(nn.Module):
     """
