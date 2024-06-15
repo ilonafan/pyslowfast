@@ -5,6 +5,8 @@
 
 import math
 import numpy as np
+import os
+import pickle
 import pprint
 import torch
 from fvcore.nn.precise_bn import get_bn_modules, update_bn_stats
@@ -17,6 +19,7 @@ import slowfast.utils.logging as logging
 import slowfast.utils.metrics as metrics
 import slowfast.utils.misc as misc
 import slowfast.visualization.tensorboard_vis as tb
+from slowfast.utils.env import pathmgr
 from slowfast.datasets import loader
 from slowfast.datasets.mixup import MixUp
 from slowfast.models import build_model
@@ -24,10 +27,8 @@ from slowfast.models.contrastive import (
     contrastive_forward,
     contrastive_parameter_surgery,
 )
-from slowfast.utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter, EarlyLearningMeter, EarlyLearningPlusMeter
+from slowfast.utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter
 from slowfast.utils.multigrid import MultigridSchedule
-from slowfast.models.losses import entropy, cross_entropy, entropy_loss, symmetric_kl_div, js_div, get_aux_loss_func, elr_loss, elr_plus_loss, update_target
-from slowfast.models.utils import mixup_data, update_ema_variables
 
 logger = logging.get_logger(__name__)
 
@@ -40,6 +41,7 @@ def train_epoch(
     train_meter,
     cur_epoch,
     cfg,
+    loss_fun,
     writer=None,
 ):
     """
@@ -75,11 +77,11 @@ def train_epoch(
         misc.frozen_bn_stats(model)
         
     # Explicitly declare reduction to mean.
-    # if cfg.MODEL.LOSS_FUNC == 'elr_loss' or cfg.MODEL.LOSS_FUNC == 'elr_loss_plus':
-    #     loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(num_examp=len(train_loader.dataset), num_classes=cfg.MODEL.NUM_CLASSES, lam=cfg.MODEL.LAM, beta=cfg.MODEL.BETA)
-    # else:
-    loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(reduction="mean")
-
+    if cfg.MODEL.LOSS_FUNC != 'elr_loss':
+        loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(reduction="mean")
+    else:
+        loss_fun = loss_fun
+    
     for cur_iter, (inputs, labels, index, time, meta) in enumerate(
         train_loader
     ):
@@ -122,11 +124,6 @@ def train_epoch(
             inputs[0] = samples
 
         x, x_w, x_s, y = (0, 0, 0, 0)
-        if cfg.TRAIN.DATASET == 'pnp':
-            x = [inputs[0][:, 0:3, :, :, :]]
-            x_w = [inputs[0][:, 3:6, :, :, :]]
-            x_s = [inputs[0][:, 6:9, :, :, :]]
-            y = labels
         
         with torch.cuda.amp.autocast(enabled=cfg.TRAIN.MIXED_PRECISION):
 
@@ -134,103 +131,7 @@ def train_epoch(
             perform_backward = True
             optimizer.zero_grad()
 
-            if cfg.MODEL.MODEL_NAME == 'MVIT_PNP':
-                output = model(x)
-                logits = output['logits']
-                preds = logits
-                probs = logits.softmax(dim=1)  # (N, 60)
-                # train_acc = accuracy(logits, y, topk=(1,))
-
-                logits_s = model(x_s)['logits']
-                logits_w = model(x_w)['logits']
-
-                type_prob = output['prob'].softmax(dim=1) # (N, 3)
-                clean_pred_prob = type_prob[:, 0]
-                idn_pred_prob = type_prob[:, 1]
-                ood_pred_prob = type_prob[:, 2]     
-                given_labels = y
-            
-                if cur_epoch < cfg.SOLVER.WARMUP_EPOCHS:
-                    loss = 0.5 * cross_entropy(logits, given_labels, reduction='mean') + 0.5 * cross_entropy(logits_w, given_labels, reduction='mean')
-                else:
-                    print("clean_pred_prob, idn_pred_prob, ood_pred_prob: ", float(clean_pred_prob[0]), float(idn_pred_prob[0]), float(ood_pred_prob[0]))
-                    # if writer is not None:
-                    #     writer.add_scalars(
-                    #         {"Train/clean_pred_prob": float(clean_pred_prob[0]), "Train/idn_pred_prob": float(idn_pred_prob[0]), "Train/odd_pred_prob": float(ood_pred_prob[0])},
-                    #         global_step=data_size * cur_epoch + cur_iter
-                    #     )
-                    
-                    probs_s = logits_s.softmax(dim=1)
-                    probs_w = logits_w.softmax(dim=1)
-                    with torch.no_grad():
-                        mean_pred_prob_dist = (probs + probs_w + given_labels) / 3
-                        sharpened_target_s = (mean_pred_prob_dist / 0.1).softmax(dim=1)
-                        flattened_target_s = (mean_pred_prob_dist * 0.1).softmax(dim=1)
-
-                    # classification loss
-                    loss_clean = 0.5 * cross_entropy(logits, given_labels, reduction='none') + 0.5 * cross_entropy(logits_w, given_labels, reduction='none')
-                    loss_idn = cross_entropy(logits_s, sharpened_target_s, reduction='none')
-                    loss_ood = cross_entropy(logits_s, flattened_target_s, reduction='none')
-            
-                    # entropy loss
-                    loss_entropy = 0.5 * entropy_loss(logits, reduction='none') + 0.5 * entropy_loss(logits_w, reduction='none')
-                    loss_clean += loss_entropy
-            
-                    # consistency loss
-                    loss_cons = symmetric_kl_div(probs, probs_w)
-
-                    type_target = torch.nn.functional.one_hot(type_prob.max(dim=1)[1], 3)
-                    if_clean = type_target[:, 0]
-                    if_idn = type_target[:, 1]
-                    if_ood = type_target[:, 2]
-                    
-                    if cfg.MODEL.WEIGHTING == 'soft':
-                        # soft seletcion / weighting
-                        loss_cls = loss_clean * clean_pred_prob + loss_idn * idn_pred_prob + loss_ood * ood_pred_prob
-                        if cfg.MODEL.NEG_CONS:
-                            loss_cons = loss_cons * (clean_pred_prob + idn_pred_prob - ood_pred_prob)
-                        else:
-                            loss_cons = loss_cons * (clean_pred_prob + idn_pred_prob)
-                        loss_cons = loss_cons.mean()
-                    else:
-                        # hard seletcion / weighting
-                        
-                        loss_cls = loss_clean * if_clean + loss_idn + if_idn + loss_ood * if_ood
-                        if cfg.MODEL.NEG_CONS:
-                            loss_cons = loss_cons * if_clean + loss_cons * if_idn - loss_cons * if_ood
-                            loss_cons = loss_cons.mean()
-                        else:
-                            loss_cons = loss_cons * if_clean + loss_cons * if_idn
-                            n_clean, n_idn = torch.nonzero(if_clean, as_tuple=False).shape[0], torch.nonzero(if_idn, as_tuple=False).shape[0]
-                            loss_cons = loss_cons.sum() / (n_clean + n_idn) if n_clean + n_idn > 0 else 0
-                    loss_cls = loss_cls.mean()
-            
-                    # auxiliary loss
-                    with torch.no_grad():
-                        clean_probs = (1 - js_div(probs, given_labels))
-                        ood_probs = js_div(probs, probs_w)
-                    
-                    print("clean_prob, ood_prob: ", float(clean_probs[0]), float(ood_probs[0]))
-                    # if writer is not None:
-                    #     writer.add_scalars(
-                    #         {"Train/clean_prob": float(clean_probs[0]), "Train/odd_prob": float(ood_probs[0])},
-                    #         global_step=data_size * cur_epoch + cur_iter
-                    #     )
-                    
-                    aux_loss_func = get_aux_loss_func(cfg)
-                    loss_aux_clean = aux_loss_func(clean_pred_prob, clean_probs)
-                    loss_aux_ood = aux_loss_func(ood_pred_prob, ood_probs)
-                    loss_aux = loss_aux_clean + loss_aux_ood
-
-                    
-                    print("Loss_cls, loss_aux, loss_cons: ", float(loss_cls), float(loss_aux), float(loss_cons))
-                    # if writer is not None:
-                    #     writer.add_scalars(
-                    #         {"Train/loss_cls": loss_cls, "Train/loss_aux": loss_aux, "Train/loss_cons": loss_cons},
-                    #         global_step=data_size * cur_epoch + cur_iter
-                    #     )
-                    loss = cfg.MODEL.ALPHA * loss_cls + cfg.MODEL.GAMMA * loss_aux + cfg.MODEL.OMEGA * loss_cons            
-            elif cfg.MODEL.MODEL_NAME == "ContrastiveModel":
+            if cfg.MODEL.MODEL_NAME == "ContrastiveModel":
                 (
                     model,
                     preds,
@@ -257,31 +158,11 @@ def train_epoch(
                 loss = loss_fun(preds, labels)
             elif cfg.MODEL.LOSS_FUNC == "elr_loss":
                 preds = model(inputs)
-                loss_odd = elr_loss(cfg, index[::2], preds[::2], labels[::2], train_meter) 
-                loss_even = elr_loss(cfg, index[::2], preds[1::2], labels[1::2], train_meter)
-                if 100 in index:
-                    print("The 100th item of target is: ", train_meter.target[100])
-                loss = loss_odd * 0.5 + loss_even * 0.5
-            elif cfg.MODEL.LOSS_FUNC =='elr_plus_loss':
-                global_step = data_size * cur_epoch + cur_iter
-                update_ema_variables(model, train_meter, global_step, cfg.ELR_PLUS.GAMMA)
-                
-                inputs = inputs[0]
-                loss_odd, preds_odd = calculate_elr_plus_loss(cfg, model, inputs[::2], labels[::2], index[::2], train_meter)
-                loss_even, preds_even = calculate_elr_plus_loss(cfg, model, inputs[1::2], labels[1::2], index[1::2], train_meter)
-                
-                preds = torch.zeros_like(labels)
-                preds[::2] = preds_odd
-                preds[1::2] = preds_even
-                
-                loss = loss_odd * 0.5 + loss_even * 0.5
+                loss = loss_fun(index, preds, labels)
             else:
                 preds = model(inputs)
-                # loss_odd = loss_fun(preds[::2], labels[::2]) 
-                # loss_even = loss_fun(preds[1::2], labels[1::2]) 
                 # Compute the loss.
                 loss = loss_fun(preds, labels)
-                # loss = loss_odd * 0.5 + loss_even * 0.5
 
         loss_extra = None
         if isinstance(loss, (list, tuple)):
@@ -296,12 +177,12 @@ def train_epoch(
         
         if cfg.MODEL.LOSS_FUNC == 'cdr':
             num_gradual = round((cfg.SOLVER.MAX_EPOCH + 1) * 0.1)
-            clip_narry = np.linspace(0.8, 1, num=num_gradual)
+            clip_narry = np.linspace(1-cfg.NOISE_PROP, 1, num=num_gradual)
             clip_narry = clip_narry[::-1]
             if cur_epoch < num_gradual:
                 clip = clip_narry[cur_epoch]
             else:
-                clip = 1 - 0.2
+                clip = 1-cfg.NOISE_PROP
         
             to_concat_g = []
             to_concat_v = []
@@ -539,9 +420,7 @@ def eval_epoch(
                     retrieval_one_hot.view(batch_size, -1, C),
                     yd_transform.view(batch_size, -1, 1),
                 )
-                preds = torch.sum(probs, 1)
-            elif cfg.MODEL.MODEL_NAME == 'MVIT_PNP':
-                preds = model(inputs)['logits']    
+                preds = torch.sum(probs, 1) 
             else:
                 preds = model(inputs)
 
@@ -605,6 +484,15 @@ def eval_epoch(
             writer.plot_eval(
                 preds=all_preds, labels=all_labels, global_step=cur_epoch
             )
+            # Write val predictions into file      
+            if cur_epoch == cfg.SOLVER.MAX_EPOCH:
+                save_path = os.path.join(cfg.OUTPUT_DIR, "val_pred.dat")
+                if du.is_root_proc():
+                    with pathmgr.open(save_path, "wb") as f:
+                        pickle.dump([all_preds, all_labels], f)
+                logger.info(
+                    "Successfully saved val prediction results to {}".format(save_path)
+                )
 
     val_meter.reset()
 
@@ -638,17 +526,6 @@ def get_smoothed_label_distribution(labels, num_class, epsilon):
     smoothed_label = torch.add(smoothed_label, addier)
     # smoothed_label.scatter_(dim=1, index=torch.unsqueeze(labels, dim=1).cpu(), value=1 - epsilon)
     return smoothed_label.to(labels.device) 
-
-def calculate_elr_plus_loss(cfg, model, inputs, labels, index, train_meter):
-    mixed_inputs, mixed_labels, mixup_l, mixup_index = mixup_data(inputs, labels, cfg.ELR_PLUS.ALPHA)   
-    
-    preds_original = train_meter.model_ema([inputs])
-    preds_original = preds_original.data.detach()
-    
-    mixed_target = update_target(cfg, train_meter, preds_original, index, mixup_index, mixup_l)
-    preds = model([mixed_inputs])
-    loss = elr_plus_loss(cfg, preds, mixed_labels, mixed_target)
-    return loss, preds
 
 
 def build_trainer(cfg):
@@ -731,10 +608,6 @@ def train(cfg):
     # Additional logger info for train head only
     logger.info(f"Train head only: {cfg.TRAIN.TRAIN_HEAD_ONLY}")
     
-    # if cfg.TRAIN.TRAIN_HEAD_ONLY:
-    #     _freeze_except_head(cfg, model)
-    #     logger.info("Freeze model except the head.")
-    
     logger.info("Model is built!")
     flops, params = 0.0, 0.0
     if du.is_master_proc() and cfg.LOG_MODEL_INFO:
@@ -810,22 +683,16 @@ def train(cfg):
         else:
             model.init_knn_labels(train_loader)
 
+    # Create loss function for ELR method explicitly.
+    if cfg.MODEL.LOSS_FUNC == 'elr_loss':
+        loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(cfg, num_examp=train_loader.dataset.num_videos)
+    else:
+        loss_fun = None
+    
     # Create meters.
     if cfg.DETECTION.ENABLE:
         train_meter = AVAMeter(len(train_loader), cfg, mode="train")
         val_meter = AVAMeter(len(val_loader), cfg, mode="val")
-    elif cfg.MODEL.LOSS_FUNC == 'elr_loss':
-        train_meter = EarlyLearningMeter(len(train_loader), cfg, len(train_loader.dataset))
-        val_meter = ValMeter(len(val_loader), cfg)
-    elif cfg.MODEL.LOSS_FUNC == 'elr_plus_loss':
-        model_ema = build_model(cfg)
-        for param in model_ema.parameters():
-            param.data = torch.zeros_like(param.data)
-            param.requires_grad = False
-        logger.info(f"Model_ema is built!")
-        
-        train_meter = EarlyLearningPlusMeter(len(train_loader), cfg, len(train_loader.dataset), model_ema)
-        val_meter = ValMeter(len(val_loader), cfg)
     else:
         train_meter = TrainMeter(len(train_loader), cfg)
         val_meter = ValMeter(len(val_loader), cfg)
@@ -897,7 +764,8 @@ def train(cfg):
             train_meter,
             cur_epoch,
             cfg,
-            writer,
+            loss_fun,
+            writer,       
         )
         epoch_timer.epoch_toc()
         logger.info(
