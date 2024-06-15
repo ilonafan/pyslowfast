@@ -4,10 +4,12 @@
 """Loss functions."""
 
 from functools import partial
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from torch.autograd import Function
 
 from pytorchvideo.losses.soft_target_cross_entropy import (
     SoftTargetCrossEntropyLoss,
@@ -130,62 +132,98 @@ def get_aux_loss_func(cfg):
         raise AssertionError(f'{cfg.MODEL.LOSS_FUNC_AUX} loss is not supported for auxiliary loss yet.')
     return aux_loss_func
 
-# class ELRLoss(nn.Module):
-#     'Compute early learning regularization loss'
-#     def __init__(self, num_examp, num_classes=60, lam=3, beta=0.7):
-#         """
-#         Args:
-#         `num_examp`: Total number of training examples.
-#         `num_classes`: Number of classes in the classification problem.
-#         `lam`: Regularization strength; must be a positive float, controling the strength of the ELR.
-#         `beta`: Temporal ensembling momentum for target estimation.
-#         """
+class ELRLoss(nn.Module):
+    'Compute early learning regularization loss'
+    def __init__(self, cfg, num_examp):
+        """
+        Args:
+        `num_examp`: Total number of training examples.
+        `num_classes`: Number of classes in the classification problem.
+        `lam`: Regularization strength; must be a positive float, controling the strength of the ELR.
+        `beta`: Temporal ensembling momentum for target estimation.
+        """
 
-#         super(ELRLoss, self).__init__()
-#         self.num_classes = num_classes
-#         self.USE_CUDA = torch.cuda.is_available()
-#         self.target = torch.zeros(num_examp, self.num_classes).cuda() if self.USE_CUDA else torch.zeros(num_examp, self.num_classes)
-#         self.beta = beta
-#         self.lam = lam
+        super(ELRLoss, self).__init__()
+        self.num_classes = cfg.MODEL.NUM_CLASSES
+        self.USE_CUDA = torch.cuda.is_available()
+        if cfg.MODEL.MODEL_NAME == 'MViT':
+            self.ce_func = SoftTargetCrossEntropyLoss(normalize_targets=False) # Only for MVITv2
+        else:
+            self.ce_func = nn.CrossEntropyLoss(reduction='mean')
+        self.target = torch.zeros(num_examp, self.num_classes).cuda() if self.USE_CUDA else torch.zeros(num_examp, self.num_classes)
+        self.beta = cfg.ELR.BETA
+        self.lam = cfg.ELR.LAM
         
+    def forward(self, index, output, label):
+        y_pred = F.softmax(output, dim=1)
+        y_pred = torch.clamp(y_pred, 1e-4, 1.0-1e-4)
+        y_pred_ = y_pred.data.detach()
 
-def elr_loss(cfg, index, output, label, train_meter):
-    """
-    Args:
-    `index`: Training sample index, due to training set shuffling, index is used to track training examples in different iterations.
-    `output`: Model's logits, same as PyTorch provided loss functions.
-    'label`: Labels, same as PyTorch provided loss functions.
-    """
+        self.target[index] = self.beta * self.target[index] + (1 - self.beta) * ((y_pred_)/(y_pred_).sum(dim=1,keepdim=True))
+        # ce_loss = F.cross_entropy(output, label)
+        ce_loss = self.ce_func(output, label)
+        elr_reg = ((1 - (self.target[index] * y_pred).sum(dim=1)).log()).mean()
+        final_loss = ce_loss + self.lam * elr_reg
+        return final_loss
 
-    y_pred = F.softmax(output, dim=1)
-    y_pred = torch.clamp(y_pred, 1e-4, 1.0-1e-4)
-    y_pred_ = y_pred.data.detach()
+class IDFDLoss(nn.Module):
+    def __init__(self, tau2):
+        super().__init__()
+        self.tau2 = tau2
 
-    train_meter.target[index] = cfg.MODEL.BETA * train_meter.target[index] + (1 - cfg.MODEL.BETA) * ((y_pred_)/(y_pred_).sum(dim=1, keepdim=True))
-    ce_loss = F.cross_entropy(output, label)
-    elr_reg = ((1 - (train_meter.target[index] * y_pred).sum(dim=1)).log()).mean()
-    final_loss = ce_loss + cfg.MODEL.LAM * elr_reg
-    return final_loss
+    def forward(self, x, ff, y):
+        L_id = F.cross_entropy(x, y)
+        
+        norm_ff = ff / (ff**2).sum(0, keepdim=True).sqrt()
+        coef_mat = torch.mm(norm_ff.t(), norm_ff)
+        coef_mat.div_(self.tau2)
+        a = torch.arange(coef_mat.size(0), device=coef_mat.device)
+        L_fd = F.cross_entropy(coef_mat, a)
+        return L_id, L_fd
+    
+class NonParametricClassifierOP(Function):
+    @staticmethod
+    def forward(ctx, x, y, memory, params):
 
-def elr_plus_loss(cfg, output, label, mixed_target):
-    y_pred = F.softmax(output,dim=1)
-    y_pred = torch.clamp(y_pred, 1e-4, 1.0-1e-4)
+        tau = params[0].item()
+        out = x.mm(memory.t())
+        out.div_(tau)
+        ctx.save_for_backward(x, memory, y, params)
+        return out
 
-    # if self.num_classes == 100:
-    #     y_labeled = y_labeled*self.q
-    #     y_labeled = y_labeled/(y_labeled).sum(dim=1,keepdim=True)
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, memory, y, params = ctx.saved_tensors
+        tau = params[0]
+        momentum = params[1]
 
-    # ce_loss = torch.mean(-torch.sum(y_labeled * F.log_softmax(output, dim=1), dim = -1))
-    ce_loss = F.cross_entropy(output, label)
-    reg = ((1 - (mixed_target * y_pred).sum(dim=1)).log()).mean()
-    final_loss = ce_loss + cfg.ELR_PLUS.LAM * reg
-    return final_loss
+        grad_output.div_(tau)
 
-def update_target(cfg, train_meter, output, index, mix_index, mixup_l = 1):
-    y_pred_ = F.softmax(output, dim=1)
-    train_meter.target[index] = cfg.ELR_PLUS.BETA * train_meter.target[index] + (1 - cfg.ELR_PLUS.BETA) *  (y_pred_)/(y_pred_).sum(dim=1, keepdim=True)
-    mixed_target = mixup_l * train_meter.target[index] + (1 - mixup_l) * train_meter.target[index][mix_index]
-    return mixed_target
+        grad_input = grad_output.mm(memory)
+        grad_input.resize_as_(x)
+
+        weight_pos = memory.index_select(0, y.view(-1)).resize_as_(x)
+        weight_pos.mul_(momentum)
+        weight_pos.add_(x.mul(1 - momentum))
+        w_norm = weight_pos.pow(2).sum(1, keepdim=True).pow(0.5)
+        updated_weight = weight_pos.div(w_norm)
+        memory.index_copy_(0, y, updated_weight)
+
+        return grad_input, None, None, None, None
+
+
+class NonParametricClassifier(nn.Module):
+    def __init__(self, input_dim, output_dim, tau=1.0, momentum=0.5):
+        super(NonParametricClassifier, self).__init__()
+        self.register_buffer('params', torch.tensor([tau, momentum]))
+        stdv = 1. / np.sqrt(input_dim / 3.)
+        self.register_buffer(
+            'memory',
+            torch.rand(output_dim, input_dim).mul_(2 * stdv).add_(-stdv))
+
+    def forward(self, x, y):
+        out = NonParametricClassifierOP.apply(x, y, self.memory, self.params)
+        return out
 
 
 _LOSSES = {
@@ -196,8 +234,7 @@ _LOSSES = {
         SoftTargetCrossEntropyLoss, normalize_targets=False
     ),
     "contrastive_loss": ContrastiveLoss,
-    "elr_loss": nn.CrossEntropyLoss,
-    "elr_plus_loss": nn.CrossEntropyLoss,
+    "elr_loss": ELRLoss,
     "cdr": partial(
         SoftTargetCrossEntropyLoss, normalize_targets=False
     ),

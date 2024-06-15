@@ -1241,7 +1241,7 @@ def build_transform(rescale_size=256, crop_size=224):
         tv.transforms.RandAugment(),
         tv.transforms.ToTensor(),
         # tv.transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-    ])
+    ]) 
     return {'train': train_transform, 'test': test_transform, 'train_strong_aug': train_transform_strong_aug}
 
 
