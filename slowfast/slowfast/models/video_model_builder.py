@@ -479,6 +479,11 @@ class ResNet(nn.Module):
             cfg.RESNET.ZERO_INIT_FINAL_BN,
             cfg.RESNET.ZERO_INIT_FINAL_CONV,
         )
+        # For RRL method
+        if cfg.TRAIN.DATASET == "rrl":
+            self.use_fc = True
+        else:
+            self.use_fc = False
 
     def _construct_network(self, cfg):
         """
@@ -654,6 +659,12 @@ class ResNet(nn.Module):
         x = self.s3(y)
         x = self.s4(x)
         x = self.s5(x)
+        
+        # For RRL method
+        if self.use_fc:
+            x, feat_lowD, error = self.head(x)
+            return x, feat_lowD, error
+        
         if self.enable_detection:
             x = self.head(x, bboxes)
         else:
@@ -685,6 +696,16 @@ class X3D(nn.Module):
         self.enable_detection = cfg.DETECTION.ENABLE
         self.num_pathways = 1
 
+        if cfg.TRAIN.DATASET == "rrl":
+            self.use_fc = True
+        else:
+            self.use_fc = False
+        
+        if cfg.TASK == "TSNE":
+            self.embeddings = True
+        else: 
+            self.embeddings = False
+        
         exp_stage = 2.0
         self.dim_c1 = cfg.X3D.DIM_C1
 
@@ -799,13 +820,22 @@ class X3D(nn.Module):
                 dropout_rate=cfg.MODEL.DROPOUT_RATE,
                 act_func=cfg.MODEL.HEAD_ACT,
                 bn_lin5_on=cfg.X3D.BN_LIN5,
+                use_fc = self.use_fc,
+                embeddings = self.embeddings,
             )
 
     def forward(self, x, bboxes=None):
+        # For RRL method
+        if self.use_fc:
+            for name, module in self.named_children():
+                if name != "head":
+                    x = module(x)
+            x, feat_lowD, error = self.head(x)
+            return x, feat_lowD, error
+        
         for module in self.children():
             x = module(x)
         return x
-
 
 @MODEL_REGISTRY.register()
 class MViT(nn.Module):
@@ -873,7 +903,12 @@ class MViT(nn.Module):
             padding=cfg.MVIT.PATCH_PADDING,
             conv_2d=self.use_2d_patch,
         )
-
+        #For RRL method
+        if cfg.TRAIN.DATASET == "rrl":
+            self.use_fc = True
+        else:
+            self.use_fc = False
+        
         if cfg.MODEL.ACT_CHECKPOINT:
             self.patch_embed = checkpoint_wrapper(self.patch_embed)
         self.input_dims = [temporal_size, spatial_size, spatial_size]
@@ -1263,8 +1298,13 @@ class MViT(nn.Module):
                 else:  # this is default, [norm->mean]
                     x = self.norm(x)
                     x = x.mean(1)
-                x = self.head(x)
-
+                
+                # For RRL method
+                if self.use_fc:
+                    x, feat_lowD, error = self.head(x)
+                    return x, feat_lowD, error
+                
+                x = self.head(x)       
         return x
 
 
