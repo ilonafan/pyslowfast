@@ -481,6 +481,7 @@ def pyav_decode(
     #         {"video": 0},
             min_delta=min_delta,
             max_delta=max_delta,
+            use_offset=use_offset,
         )
         frames_out = [None] * len(num_frames)
         for k in range(len(num_frames)):
