@@ -16,8 +16,6 @@ from slowfast.datasets.multigrid_helper import ShortCycleBatchSampler
 
 from . import utils as utils
 from .build import build_dataset
-from .transform import build_transform
-from .transform import CLDataTransform
 
 
 def multiple_samples_collate(batch, fold=False):
@@ -95,13 +93,13 @@ def construct_loader(cfg, split, is_precise_bn=False):
         split (str): the split of the data loader. Options include `train`,
             `val`, and `test`.
     """
-    assert split in ["train", "val", "test"]
+    assert split in ["train", "val", "test", "eval"]
     if split in ["train"]:
         dataset_name = cfg.TRAIN.DATASET
         batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
         shuffle = True
         drop_last = True
-    elif split in ["val"]:
+    elif split in ["val", "eval"]:
         dataset_name = cfg.TRAIN.DATASET
         batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
         shuffle = False
@@ -113,14 +111,7 @@ def construct_loader(cfg, split, is_precise_bn=False):
         drop_last = False
 
     # Construct the dataset
-    if dataset_name == 'pnp' and split == 'train':
-        transform = build_transform()
-        dataset = build_dataset(dataset_name, cfg, split, CLDataTransform(transform['train'], transform['train_strong_aug']))
-    elif dataset_name == 'pnp':
-        transform = build_transform()
-        dataset = build_dataset(dataset_name, cfg, split, transform['test'])
-    else:
-        dataset = build_dataset(dataset_name, cfg, split, transform=None)
+    dataset = build_dataset(dataset_name, cfg, split, transform=None)
 
     if isinstance(dataset, torch.utils.data.IterableDataset):
         loader = torch.utils.data.DataLoader(
@@ -135,7 +126,7 @@ def construct_loader(cfg, split, is_precise_bn=False):
     else:
         if (
             cfg.MULTIGRID.SHORT_CYCLE
-            and split in ["train"]
+            and split in ["train", "eval"]
             and not is_precise_bn
         ):
             # Create a sampler for multi-process training
@@ -163,7 +154,7 @@ def construct_loader(cfg, split, is_precise_bn=False):
                     or cfg.DATA.TRAIN_CROP_NUM_TEMPORAL > 1
                     or cfg.DATA.TRAIN_CROP_NUM_SPATIAL > 1
                 )
-                and split in ["train"]
+                and split in ["train", "eval"]
                 and not cfg.MODEL.MODEL_NAME == "ContrastiveModel"
             ):
                 collate_func = partial(
