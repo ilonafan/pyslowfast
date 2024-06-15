@@ -258,6 +258,7 @@ class TestMeter(object):
         num_clips,
         num_cls,
         overall_iters,
+        model_name,
         multi_label=False,
         ensemble_method="sum",
     ):
@@ -285,7 +286,11 @@ class TestMeter(object):
         self.ensemble_method = ensemble_method
         # Initialize tensors.
         self.video_preds = torch.zeros((num_videos, num_cls))
-        self.embeddings = torch.zeros((num_videos, 768))  # Store embedding
+        if model_name == "MViT":
+            self.embeddings = torch.zeros((num_videos, 768))  # Store high dimensional embedding
+        elif model_name == "X3D":
+            self.embeddings = torch.zeros((num_videos, 2048))
+        self.embeddings_lowD = torch.zeros((num_videos, 48))  # Store low dimensional embedding
         
         if multi_label:
             self.video_preds -= 1e10
@@ -311,8 +316,8 @@ class TestMeter(object):
         if self.multi_label:
             self.video_preds -= 1e10
         self.video_labels.zero_()
-        
-    def update_embeddings(self, preds, labels, clip_ids):
+    
+    def update_embeddings(self, preds, feat, labels, clip_ids):
         for ind in range(preds.shape[0]):
             vid_id = int(clip_ids[ind]) // self.num_clips
             if self.video_labels[vid_id].sum() > 0:
@@ -322,7 +327,31 @@ class TestMeter(object):
                 )
             self.video_labels[vid_id] = labels[ind]
             if self.ensemble_method == "sum":
-                self.embeddings[vid_id] += preds[ind]
+                self.embeddings[vid_id] += feat[ind]
+            elif self.ensemble_method == "max":
+                self.embeddings[vid_id] = torch.max(
+                    self.video_preds[vid_id], preds[ind]
+                )
+            else:
+                raise NotImplementedError(
+                    "Ensemble Method {} is not supported".format(
+                        self.ensemble_method
+                    )
+                )
+            self.clip_count[vid_id] += 1
+    
+    def update_embeddings_rrl(self, preds, feat, feat_lowD, labels, clip_ids):
+        for ind in range(preds.shape[0]):
+            vid_id = int(clip_ids[ind]) // self.num_clips
+            if self.video_labels[vid_id].sum() > 0:
+                assert torch.equal(
+                    self.video_labels[vid_id].type(torch.FloatTensor),
+                    labels[ind].type(torch.FloatTensor),
+                )
+            self.video_labels[vid_id] = labels[ind]
+            if self.ensemble_method == "sum":
+                self.embeddings[vid_id] += feat[ind]
+                self.embeddings_lowD[vid_id] += feat_lowD[ind]
             elif self.ensemble_method == "max":
                 self.embeddings[vid_id] = torch.max(
                     self.video_preds[vid_id], preds[ind]
@@ -554,8 +583,6 @@ class TrainMeter(object):
         self.data_timer = Timer()
         self.net_timer = Timer()
         self.loss = ScalarMeter(cfg.LOG_PERIOD)
-        # Used for early learning regularization
-        # self.target = torch.zeros(num_data, cfg.MODEL.NUM_CLASSES).cuda() if cfg.NUM_GPUS > 0 else torch.zeros(num_data, cfg.MODEL.NUM_CLASSES)  
         self.loss_total = 0.0
         self.lr = None
         self.grad_norm = None
@@ -861,6 +888,8 @@ class ValMeter(object):
                 torch.cat(self.all_preds).cpu().numpy(),
                 torch.cat(self.all_labels).cpu().numpy(),
             )
+            
+            logging.log_json_stats(stats, self.output_dir)
         else:
             top1_err = self.num_top1_mis / self.num_samples
             top5_err = self.num_top5_mis / self.num_samples
@@ -872,7 +901,10 @@ class ValMeter(object):
             stats["min_top1_err"] = self.min_top1_err
             stats["min_top5_err"] = self.min_top5_err
 
-        logging.log_json_stats(stats, self.output_dir)
+            logging.log_json_stats(stats, self.output_dir)
+            
+            return top1_err <= self.min_top1_err
+        
 
 
 def get_map(preds, labels):
@@ -956,386 +988,3 @@ class EpochTimer:
 
         return np.median(self.epoch_times)
 
-
-class EarlyLearningMeter(object):
-    """
-    Measure training stats.
-    """
-
-    def __init__(self, epoch_iters, cfg, num_data):
-        """
-        Args:
-            epoch_iters (int): the overall number of iterations of one epoch.
-            cfg (CfgNode): configs.
-        """
-        self._cfg = cfg
-        self.epoch_iters = epoch_iters
-        self.MAX_EPOCH = cfg.SOLVER.MAX_EPOCH * epoch_iters
-        self.iter_timer = Timer()
-        self.data_timer = Timer()
-        self.net_timer = Timer()
-        self.loss = ScalarMeter(cfg.LOG_PERIOD)
-        # Used for early learning regularization
-        self.target = torch.zeros(num_data, cfg.MODEL.NUM_CLASSES).cuda() if cfg.NUM_GPUS > 0 else torch.zeros(num_data, cfg.MODEL.NUM_CLASSES)  
-        self.loss_total = 0.0
-        self.lr = None
-        self.grad_norm = None
-        # Current minibatch errors (smoothed over a window).
-        self.mb_top1_err = ScalarMeter(cfg.LOG_PERIOD)
-        self.mb_top5_err = ScalarMeter(cfg.LOG_PERIOD)
-        # Number of misclassified examples.
-        self.num_top1_mis = 0
-        self.num_top5_mis = 0
-        self.num_samples = 0
-        self.output_dir = cfg.OUTPUT_DIR
-        self.multi_loss = None
-
-    def reset(self):
-        """
-        Reset the Meter.
-        """
-        self.loss.reset()
-        self.loss_total = 0.0
-        self.lr = None
-        self.grad_norm = None
-        self.mb_top1_err.reset()
-        self.mb_top5_err.reset()
-        self.num_top1_mis = 0
-        self.num_top5_mis = 0
-        self.num_samples = 0
-        if self.multi_loss is not None:
-            self.multi_loss.reset()
-
-    def iter_tic(self):
-        """
-        Start to record time.
-        """
-        self.iter_timer.reset()
-        self.data_timer.reset()
-
-    def iter_toc(self):
-        """
-        Stop to record time.
-        """
-        self.iter_timer.pause()
-        self.net_timer.pause()
-
-    def data_toc(self):
-        self.data_timer.pause()
-        self.net_timer.reset()
-
-    def update_stats(
-        self, top1_err, top5_err, loss, lr, grad_norm, mb_size, multi_loss=None
-    ):
-        """
-        Update the current stats.
-        Args:
-            top1_err (float): top1 error rate.
-            top5_err (float): top5 error rate.
-            loss (float): loss value.
-            lr (float): learning rate.
-            mb_size (int): mini batch size.
-            multi_loss (list): a list of values for multi-tasking losses.
-        """
-        self.loss.add_value(loss)
-        self.lr = lr
-        self.grad_norm = grad_norm
-        self.loss_total += loss * mb_size
-        self.num_samples += mb_size
-
-        if not self._cfg.DATA.MULTI_LABEL:
-            # Current minibatch stats
-            self.mb_top1_err.add_value(top1_err)
-            self.mb_top5_err.add_value(top5_err)
-            # Aggregate stats
-            self.num_top1_mis += top1_err * mb_size
-            self.num_top5_mis += top5_err * mb_size
-        if multi_loss:
-            if self.multi_loss is None:
-                self.multi_loss = ListMeter(len(multi_loss))
-            self.multi_loss.add_value(multi_loss)
-        if (
-            self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR > 0.0
-            and len(self.loss.deque) > 6
-        ):
-            prev_loss = 0.0
-            for i in range(2, 7):
-                prev_loss += self.loss.deque[len(self.loss.deque) - i]
-            if (
-                loss
-                > self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR * prev_loss / 5.0
-            ):
-                raise RuntimeError(
-                    "ERROR: Got Loss explosion of {} {}".format(
-                        loss, datetime.datetime.now()
-                    )
-                )
-
-    def log_iter_stats(self, cur_epoch, cur_iter, output_dir):  # Fix: add argument `output_dir`
-        """
-        log the stats of the current iteration.
-        Args:
-            cur_epoch (int): the number of current epoch.
-            cur_iter (int): the number of current iteration.
-        """
-        if (cur_iter + 1) % self._cfg.LOG_PERIOD != 0:
-            return
-        eta_sec = self.iter_timer.seconds() * (
-            self.MAX_EPOCH - (cur_epoch * self.epoch_iters + cur_iter + 1)
-        )
-        eta = str(datetime.timedelta(seconds=int(eta_sec)))
-        stats = {
-            "_type": "train_iter_{}".format(
-                "ssl" if self._cfg.TASK == "ssl" else ""
-            ),
-            "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
-            "iter": "{}/{}".format(cur_iter + 1, self.epoch_iters),
-            "dt": self.iter_timer.seconds(),
-            "dt_data": self.data_timer.seconds(),
-            "dt_net": self.net_timer.seconds(),
-            "eta": eta,
-            "loss": self.loss.get_win_median(),
-            "lr": self.lr,
-            "grad_norm": self.grad_norm,
-            "gpu_mem": "{:.2f}G".format(misc.gpu_mem_usage()),
-        }
-        if not self._cfg.DATA.MULTI_LABEL:
-            stats["top1_err"] = self.mb_top1_err.get_win_median()
-            stats["top5_err"] = self.mb_top5_err.get_win_median()
-        if self.multi_loss is not None:
-            loss_list = self.multi_loss.get_value()
-            for idx, loss in enumerate(loss_list):
-                stats["loss_" + str(idx)] = loss
-                
-        # Fix output_dir None
-        logging.log_json_stats(stats, output_dir=output_dir)
-
-    def log_epoch_stats(self, cur_epoch, output_dir): #Fix: Add argument output_dir
-        """
-        Log the stats of the current epoch.
-        Args:
-            cur_epoch (int): the number of current epoch.
-        """
-        eta_sec = self.iter_timer.seconds() * (
-            self.MAX_EPOCH - (cur_epoch + 1) * self.epoch_iters
-        )
-        eta = str(datetime.timedelta(seconds=int(eta_sec)))
-        stats = {
-            "_type": "train_epoch{}".format(
-                "_ssl" if self._cfg.TASK == "ssl" else ""
-            ),
-            "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
-            "dt": self.iter_timer.seconds(),
-            "dt_data": self.data_timer.seconds(),
-            "dt_net": self.net_timer.seconds(),
-            "eta": eta,
-            "lr": self.lr,
-            "grad_norm": self.grad_norm,
-            "gpu_mem": "{:.2f}G".format(misc.gpu_mem_usage()),
-            "RAM": "{:.2f}/{:.2f}G".format(*misc.cpu_mem_usage()),
-        }
-        if not self._cfg.DATA.MULTI_LABEL:
-            top1_err = self.num_top1_mis / self.num_samples
-            top5_err = self.num_top5_mis / self.num_samples
-            avg_loss = self.loss_total / self.num_samples
-            stats["top1_err"] = top1_err
-            stats["top5_err"] = top5_err
-            stats["loss"] = avg_loss
-        if self.multi_loss is not None:
-            avg_loss_list = self.multi_loss.get_global_avg()
-            for idx, loss in enumerate(avg_loss_list):
-                stats["loss_" + str(idx)] = loss
-        logging.log_json_stats(stats, output_dir=output_dir) #Fix self.output_dir as output_dir
-
-
-class EarlyLearningPlusMeter(object):
-    """
-    Measure training stats.
-    """
-
-    def __init__(self, epoch_iters, cfg, num_data, model_ema):
-        """
-        Args:
-            epoch_iters (int): the overall number of iterations of one epoch.
-            cfg (CfgNode): configs.
-        """
-        self._cfg = cfg
-        self.epoch_iters = epoch_iters
-        self.MAX_EPOCH = cfg.SOLVER.MAX_EPOCH * epoch_iters
-        self.iter_timer = Timer()
-        self.data_timer = Timer()
-        self.net_timer = Timer()
-        self.loss = ScalarMeter(cfg.LOG_PERIOD)
-        # Used for early learning regularization
-        self.target = torch.zeros(num_data, cfg.MODEL.NUM_CLASSES).cuda() if cfg.NUM_GPUS > 0 else torch.zeros(num_data, cfg.MODEL.NUM_CLASSES)  
-        # Used for elr_plus weight averaging
-        self.model_ema = model_ema
-        self.loss_total = 0.0
-        self.lr = None
-        self.grad_norm = None
-        # Current minibatch errors (smoothed over a window).
-        self.mb_top1_err = ScalarMeter(cfg.LOG_PERIOD)
-        self.mb_top5_err = ScalarMeter(cfg.LOG_PERIOD)
-        # Number of misclassified examples.
-        self.num_top1_mis = 0
-        self.num_top5_mis = 0
-        self.num_samples = 0
-        self.output_dir = cfg.OUTPUT_DIR
-        self.multi_loss = None
-
-    def reset(self):
-        """
-        Reset the Meter.
-        """
-        self.loss.reset()
-        self.loss_total = 0.0
-        self.lr = None
-        self.grad_norm = None
-        self.mb_top1_err.reset()
-        self.mb_top5_err.reset()
-        self.num_top1_mis = 0
-        self.num_top5_mis = 0
-        self.num_samples = 0
-        if self.multi_loss is not None:
-            self.multi_loss.reset()
-
-    def iter_tic(self):
-        """
-        Start to record time.
-        """
-        self.iter_timer.reset()
-        self.data_timer.reset()
-
-    def iter_toc(self):
-        """
-        Stop to record time.
-        """
-        self.iter_timer.pause()
-        self.net_timer.pause()
-
-    def data_toc(self):
-        self.data_timer.pause()
-        self.net_timer.reset()
-
-    def update_stats(
-        self, top1_err, top5_err, loss, lr, grad_norm, mb_size, multi_loss=None
-    ):
-        """
-        Update the current stats.
-        Args:
-            top1_err (float): top1 error rate.
-            top5_err (float): top5 error rate.
-            loss (float): loss value.
-            lr (float): learning rate.
-            mb_size (int): mini batch size.
-            multi_loss (list): a list of values for multi-tasking losses.
-        """
-        self.loss.add_value(loss)
-        self.lr = lr
-        self.grad_norm = grad_norm
-        self.loss_total += loss * mb_size
-        self.num_samples += mb_size
-
-        if not self._cfg.DATA.MULTI_LABEL:
-            # Current minibatch stats
-            self.mb_top1_err.add_value(top1_err)
-            self.mb_top5_err.add_value(top5_err)
-            # Aggregate stats
-            self.num_top1_mis += top1_err * mb_size
-            self.num_top5_mis += top5_err * mb_size
-        if multi_loss:
-            if self.multi_loss is None:
-                self.multi_loss = ListMeter(len(multi_loss))
-            self.multi_loss.add_value(multi_loss)
-        if (
-            self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR > 0.0
-            and len(self.loss.deque) > 6
-        ):
-            prev_loss = 0.0
-            for i in range(2, 7):
-                prev_loss += self.loss.deque[len(self.loss.deque) - i]
-            if (
-                loss
-                > self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR * prev_loss / 5.0
-            ):
-                raise RuntimeError(
-                    "ERROR: Got Loss explosion of {} {}".format(
-                        loss, datetime.datetime.now()
-                    )
-                )
-
-    def log_iter_stats(self, cur_epoch, cur_iter, output_dir):  # Fix: add argument `output_dir`
-        """
-        log the stats of the current iteration.
-        Args:
-            cur_epoch (int): the number of current epoch.
-            cur_iter (int): the number of current iteration.
-        """
-        if (cur_iter + 1) % self._cfg.LOG_PERIOD != 0:
-            return
-        eta_sec = self.iter_timer.seconds() * (
-            self.MAX_EPOCH - (cur_epoch * self.epoch_iters + cur_iter + 1)
-        )
-        eta = str(datetime.timedelta(seconds=int(eta_sec)))
-        stats = {
-            "_type": "train_iter_{}".format(
-                "ssl" if self._cfg.TASK == "ssl" else ""
-            ),
-            "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
-            "iter": "{}/{}".format(cur_iter + 1, self.epoch_iters),
-            "dt": self.iter_timer.seconds(),
-            "dt_data": self.data_timer.seconds(),
-            "dt_net": self.net_timer.seconds(),
-            "eta": eta,
-            "loss": self.loss.get_win_median(),
-            "lr": self.lr,
-            "grad_norm": self.grad_norm,
-            "gpu_mem": "{:.2f}G".format(misc.gpu_mem_usage()),
-        }
-        if not self._cfg.DATA.MULTI_LABEL:
-            stats["top1_err"] = self.mb_top1_err.get_win_median()
-            stats["top5_err"] = self.mb_top5_err.get_win_median()
-        if self.multi_loss is not None:
-            loss_list = self.multi_loss.get_value()
-            for idx, loss in enumerate(loss_list):
-                stats["loss_" + str(idx)] = loss
-                
-        # Fix output_dir None
-        logging.log_json_stats(stats, output_dir=output_dir)
-
-    def log_epoch_stats(self, cur_epoch, output_dir): #Fix: Add argument output_dir
-        """
-        Log the stats of the current epoch.
-        Args:
-            cur_epoch (int): the number of current epoch.
-        """
-        eta_sec = self.iter_timer.seconds() * (
-            self.MAX_EPOCH - (cur_epoch + 1) * self.epoch_iters
-        )
-        eta = str(datetime.timedelta(seconds=int(eta_sec)))
-        stats = {
-            "_type": "train_epoch{}".format(
-                "_ssl" if self._cfg.TASK == "ssl" else ""
-            ),
-            "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
-            "dt": self.iter_timer.seconds(),
-            "dt_data": self.data_timer.seconds(),
-            "dt_net": self.net_timer.seconds(),
-            "eta": eta,
-            "lr": self.lr,
-            "grad_norm": self.grad_norm,
-            "gpu_mem": "{:.2f}G".format(misc.gpu_mem_usage()),
-            "RAM": "{:.2f}/{:.2f}G".format(*misc.cpu_mem_usage()),
-        }
-        if not self._cfg.DATA.MULTI_LABEL:
-            top1_err = self.num_top1_mis / self.num_samples
-            top5_err = self.num_top5_mis / self.num_samples
-            avg_loss = self.loss_total / self.num_samples
-            stats["top1_err"] = top1_err
-            stats["top5_err"] = top5_err
-            stats["loss"] = avg_loss
-        if self.multi_loss is not None:
-            avg_loss_list = self.multi_loss.get_global_avg()
-            for idx, loss in enumerate(avg_loss_list):
-                stats["loss_" + str(idx)] = loss
-        logging.log_json_stats(stats, output_dir=output_dir) #Fix self.output_dir as output_dir
