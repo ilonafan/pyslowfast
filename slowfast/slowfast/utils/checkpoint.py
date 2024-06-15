@@ -148,6 +148,42 @@ def save_checkpoint(path_to_job, model, optimizer, epoch, cfg, scaler=None):
         torch.save(checkpoint, f)
     return path_to_checkpoint
 
+def save_best_checkpoint(path_to_job, model, optimizer, epoch, cfg, scaler=None):
+    """
+    Save a best (val) checkpoint.
+    Args:
+        model (model): model to save the weight to the checkpoint.
+        optimizer (optim): optimizer to save the historical state.
+        epoch (int): current number of epoch of the model.
+        cfg (CfgNode): configs to save.
+        scaler (GradScaler): the mixed precision scale.
+    """
+    # Save checkpoints only from the master process.
+    if not du.is_master_proc(cfg.NUM_GPUS * cfg.NUM_SHARDS):
+        return
+    # Ensure that the checkpoint dir exists.
+    pathmgr.mkdirs(get_checkpoint_dir(path_to_job))
+    # Omit the DDP wrapper in the multi-gpu setting.
+    sd = model.module.state_dict() if cfg.NUM_GPUS > 1 else model.state_dict()
+    normalized_sd = sub_to_normal_bn(sd)
+
+    # Record the state.
+    checkpoint = {
+        "epoch": epoch,
+        "model_state": normalized_sd,
+        "optimizer_state": optimizer.state_dict(),
+        "cfg": cfg.dump(),
+    }
+    if scaler is not None:
+        checkpoint["scaler_state"] = scaler.state_dict()
+        
+    name = "checkpoint_best.pyth"
+    path_to_checkpoint = os.path.join(get_checkpoint_dir(path_to_job), name)
+    
+    with pathmgr.open(path_to_checkpoint, "wb") as f:
+        torch.save(checkpoint, f)
+    return path_to_checkpoint
+
 
 def inflate_weight(state_dict_2d, state_dict_3d):
     """
