@@ -950,13 +950,14 @@ def compute_features(cfg, eval_loader, model):
     return features, targets, probs   
 
 def label_clean(cfg, features, labels, probs, train_loader, low_th):     
+        N = features.shape[0]  
+        
         # Hyperparameter
         k = 10 if N >= 400 else 3  
         temperature = 0.3  
         high_th = 0.99 
-        # Initalize knn search
-        N = features.shape[0]   
         
+        # Initalize knn search
         index = faiss.IndexFlatIP(features.shape[1])   
         index.add(features)  
         D,I = index.search(features, k+1)  
