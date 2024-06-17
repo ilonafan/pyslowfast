@@ -117,10 +117,10 @@ class Rrl(torch.utils.data.Dataset):
             self.cfg.DATA.PATH_TO_DATA_DIR, "train.csv"
         )
         # Only for saving embeddings
-        # elif self.mode == "test":
-        #     path_to_file = os.path.join(
-        #     self.cfg.DATA.PATH_TO_DATA_DIR, "train.csv"
-        # )
+        if self.mode == "test" and self.cfg.TASK == "TSNE":
+            path_to_file = os.path.join(
+            self.cfg.DATA.PATH_TO_DATA_DIR, "train.csv"
+        )
         else:
             path_to_file = os.path.join(
                 self.cfg.DATA.PATH_TO_DATA_DIR, "{}.csv".format(self.mode)
