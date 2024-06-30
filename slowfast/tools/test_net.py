@@ -8,6 +8,8 @@ import os
 import pickle
 import torch
 import csv
+import math
+from tqdm import tqdm
 
 import slowfast.utils.checkpoint as cu
 import slowfast.utils.distributed as du
@@ -324,32 +326,104 @@ def test(cfg):
         test_meters.append(test_meter)
         if writer is not None:
             writer.close()
+        
+        if cfg.TASK == "fps":
+            evaluate_computational_performance(model, test_loader, cfg)
+            break
+    return
 
-    result_string_views = "_p{:.2f}_f{:.2f}".format(params / 1e6, flops)
 
-    for view, test_meter in zip(cfg.TEST.NUM_TEMPORAL_CLIPS, test_meters):
-        logger.info(
-            "Finalized testing with {} temporal clips and {} spatial crops".format(
-                view, cfg.TEST.NUM_SPATIAL_CROPS
-            )
-        )
-        result_string_views += "_{}a{}" "".format(
-            view, test_meter.stats["top1_acc"]
-        )
+def init_measurement():
+    MEASURE_REPETITION = 300
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
+    infer_durations = np.zeros((MEASURE_REPETITION,1))
+    return starter,ender,infer_durations
 
-        result_string = (
-            "_p{:.2f}_f{:.2f}_{}a{} Top5 Acc: {} MEM: {:.2f} f: {:.4f}"
-            "".format(
-                params / 1e6,
-                flops,
-                view,
-                test_meter.stats["top1_acc"],
-                test_meter.stats["top5_acc"],
-                misc.gpu_mem_usage(),
-                flops,
-            )
-        )
 
-        logger.info("{}".format(result_string))
-    logger.info("{}".format(result_string_views))
-    return result_string + " \n " + result_string_views
+def get_measurement_stats(infer_durations):
+    duration_mean = np.mean(infer_durations)
+    duration_std = np.std(infer_durations)
+    return duration_mean, duration_std
+
+
+def get_num_params(model):
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return num_params
+
+def evaluate_computational_performance(model, test_loader, cfg):
+    WARMUP_REPETITION = 100
+    MEASURE_REPETITION = 300
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_properties = torch.cuda.get_device_properties(device)
+    device_memory = math.floor(getattr(device_properties, "total_memory") / 1e9) # unit: GB
+
+    starter, ender, infer_durations = init_measurement()
+
+    model = model.to(device)
+    num_params = get_num_params(model)
+
+    with torch.no_grad():
+        # GPU warm-up
+        for _ in tqdm(range(WARMUP_REPETITION), desc="GPU warm-up", total=WARMUP_REPETITION):
+            for _, (inputs, labels, video_idx, time, meta) in enumerate(
+                test_loader
+            ):
+                if cfg.NUM_GPUS:
+                    # Transfer the data to the current GPU device.
+                    if isinstance(inputs, (list,)):
+                        for i in range(len(inputs)):
+                            inputs[i] = inputs[i].cuda(non_blocking=True)
+                    else:
+                        inputs = inputs.cuda(non_blocking=True)
+                    # Transfer the data to the current GPU device.
+                    labels = labels.cuda()
+                    video_idx = video_idx.cuda()
+                    for key, val in meta.items():
+                        if isinstance(val, (list,)):
+                            for i in range(len(val)):
+                                val[i] = val[i].cuda(non_blocking=True)
+                        else:
+                            meta[key] = val.cuda(non_blocking=True)
+                preds, _, _ = model(inputs)
+                break
+            
+        for rep in tqdm(range(MEASURE_REPETITION), desc="Measuring inference time", total=MEASURE_REPETITION):
+            starter.record()
+            for _, (inputs, labels, video_idx, time, meta) in enumerate(
+                test_loader
+            ):
+                if cfg.NUM_GPUS:
+                    # Transfer the data to the current GPU device.
+                    if isinstance(inputs, (list,)):
+                        for i in range(len(inputs)):
+                            inputs[i] = inputs[i].cuda(non_blocking=True)
+                    else:
+                        inputs = inputs.cuda(non_blocking=True)
+                    # Transfer the data to the current GPU device.
+                    labels = labels.cuda()
+                    video_idx = video_idx.cuda()
+                    for key, val in meta.items():
+                        if isinstance(val, (list,)):
+                            for i in range(len(val)):
+                                val[i] = val[i].cuda(non_blocking=True)
+                        else:
+                            meta[key] = val.cuda(non_blocking=True)
+                preds, _, _ = model(inputs)
+                break
+            ender.record()
+            
+            # Wait for GPU sync
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender) # time unit is milliseconds
+            curr_time = curr_time / 1000 # ms -> s
+            infer_durations[rep] = curr_time
+    duration_mean, duration_std = get_measurement_stats(infer_durations)
+    summary = {
+        "Device": f"{torch.cuda.get_device_name(device)} ({device_memory} GB)",
+        "#Parameters": f"{num_params/1e6:.2f} M",
+        "Inference time": f"Mean: {duration_mean:.3f}s, Std: {duration_std:.3f}s",
+        "FPS": f"{cfg.TEST.BATCH_SIZE * cfg.TEST.NUM_SPATIAL_CROPS * cfg.DATA.NUM_FRAMES/ duration_mean:.3f}",
+    }
+    print(summary)
