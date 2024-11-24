@@ -479,9 +479,6 @@ _C.ELR.LAM = 3
 # Clustering algorithm for CRL method.
 _C.CLUSTER = "kmeans"
 
-# Sample selection method.
-_C.SAMPLE_SELECTION = "soft_label"
-
 # Temperature scaling parameter for contrastive loss.
 _C.TAU1 = 0.3 
 
