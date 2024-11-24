@@ -7,6 +7,18 @@
 PyTorch implementation of paper "**Exploring Video-Based Driver Activity Recognition under Noisy Labels**".
 
 
+## Dependencies
+
+- [Python](https://python.org/), version = 3.10
+- [Ubuntu 16.04 Desktop](https://ubuntu.com/download)
+- [PyTorch](https://PyTorch.org/), version = 1.12.1
+- [CUDA](https://developer.nvidia.com/cuda-downloads), version = 11.6
+- [Anaconda3](https://www.anaconda.com/)
+
+## Installation
+
+Please find installation instructions for PyTorch and PySlowFast in [INSTALL.md](INSTALL.md) and follow the instructions in [DATASET.md](slowfast/datasets/DATASET.md) to prepare the datasets in Kinetics format.
+
 ## Overview
 
 - `detectron2_repo/`: Detectron2 repository
@@ -19,18 +31,6 @@ PyTorch implementation of paper "**Exploring Video-Based Driver Activity Recogni
         - `models/`: Implementations of models
         - `utils/`: Helper functions
   - `tools/`: Scripts for training/validation/testing
-
-## Dependencies
-
-- [Python](https://python.org/), version = 3.10
-- [Ubuntu 16.04 Desktop](https://ubuntu.com/download)
-- [PyTorch](https://PyTorch.org/), version = 1.12.1
-- [CUDA](https://developer.nvidia.com/cuda-downloads), version = 11.6
-- [Anaconda3](https://www.anaconda.com/)
-
-## Installation
-
-Please find installation instructions for PyTorch and PySlowFast in [INSTALL.md](INSTALL.md) and follow the instructions in [DATASET.md](slowfast/datasets/DATASET.md) to prepare the datasets in Kinetics format.
 
 ## Usage
 
