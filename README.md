@@ -32,11 +32,9 @@ PyTorch implementation of paper "**Exploring Video-Based Driver Activity Recogni
 
 Please find installation instructions for PyTorch and PySlowFast in [INSTALL.md](INSTALL.md) and follow the instructions in [DATASET.md](slowfast/datasets/DATASET.md) to prepare the datasets in Kinetics format.
 
-## Experiments
+## Usage
 
-We verify the effectiveness of the PNP method and Robust Early-Learning method on simulated noisy datasets. 
-
-In this repository, we provide the subset we used for this project. You should download the NTU60 dataset and create the subset according to the csv files. The dataset should be put into the same folder of labels as the instructions in [DATASET.md](slowfast/datasets/DATASET.md).
+In this repository, we provide the datast we used for this project. You should download the Drive&Act dataset and create the subset according to the csv files. The dataset should be put into the same folder of labels as the instructions in [DATASET.md](slowfast/datasets/DATASET.md).
 
 To generate noise labels, you can run the [generate_noisy_label.ipynb](slowfast/script/generate_noisy_label.ipynb) in the script folder with any noise proportion.
 
@@ -55,5 +53,6 @@ To perform test, you can set the TRAIN.ENABLE to False, and do not forget to pas
 
 Great thanks for these open-source repositories: 
 
-- PySlowFast: [PySlowFast](https://github.com/facebookresearch/SlowFast)
+- [PySlowFast](https://github.com/facebookresearch/SlowFast)
+- [Drive&Act](https://driveandact.com/)
 
