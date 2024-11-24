@@ -229,7 +229,6 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
         logger.info(
             "Successfully saved prediction results to {}".format(save_path)
         )
-            
         test_meter.finalize_metrics()
     return test_meter
 
@@ -329,9 +328,37 @@ def test(cfg):
         
         if cfg.TASK == "fps":
             evaluate_computational_performance(model, test_loader, cfg)
-            break
-    return
+            return
+        
+    result_string_views = "_p{:.2f}_f{:.2f}".format(params / 1e6, flops)
+    
+    for view, test_meter in zip(cfg.TEST.NUM_TEMPORAL_CLIPS, test_meters):
+        logger.info(
+            "Finalized testing with {} temporal clips and {} spatial crops".format(
+                view, cfg.TEST.NUM_SPATIAL_CROPS
+            )
+        )
+        result_string_views += "_{}a{}" "".format(
+            view, test_meter.stats["top1_acc"]
+        )
 
+        result_string = (
+            "_p{:.2f}_f{:.2f}_{}a{} Top5 Acc: {} MEM: {:.2f} f: {:.4f}"
+            "".format(
+                params / 1e6,
+                flops,
+                view,
+                test_meter.stats["top1_acc"],
+                test_meter.stats["top5_acc"],
+                0.0,
+                misc.gpu_mem_usage(),
+                flops,
+            )
+        )
+
+        logger.info("{}".format(result_string))
+    logger.info("{}".format(result_string_views))
+    return result_string + " \n " + result_string_views
 
 def init_measurement():
     MEASURE_REPETITION = 300
