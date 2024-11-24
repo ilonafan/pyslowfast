@@ -11,11 +11,11 @@ import pprint
 import torch
 from fvcore.nn.precise_bn import get_bn_modules, update_bn_stats
 import torch.nn.functional as F
-from pathlib import Path
-import pandas as pd
-import csv
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
 
 import slowfast.models.losses as losses
+from slowfast.models.losses import NonParametricClassifier, IDFDLoss
 import slowfast.models.optimizer as optim
 import slowfast.utils.checkpoint as cu
 import slowfast.utils.distributed as du
@@ -30,10 +30,8 @@ from slowfast.models import build_model
 from slowfast.models.contrastive import contrastive_parameter_surgery
 from slowfast.utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter
 from slowfast.utils.multigrid import MultigridSchedule
-from sklearn.mixture import GaussianMixture
-from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
-from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
-from scipy.optimize import linear_sum_assignment
+from slowfast.models.head_helper import Normalize
+
 
 logger = logging.get_logger(__name__)
 
@@ -48,6 +46,7 @@ def train_epoch(
     cfg,
     clean_idx,
     hard_labels,
+    npc,
     writer=None,
 ):
     """
@@ -84,6 +83,12 @@ def train_epoch(
         
     # Explicitly declare reduction to mean.
     loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(reduction="mean")
+    
+    # Losses of deep clustering module
+    norm = Normalize(2)
+    norm = norm.cuda(non_blocking=True)
+    loss_idfd = IDFDLoss(tau2=cfg.TAU3)
+    loss_idfd = loss_idfd.cuda(non_blocking=True)
     
     for cur_iter, (inputs, labels, index, time, meta) in enumerate(
         train_loader
@@ -137,6 +142,11 @@ def train_epoch(
             
             preds, feat, error_recon = model(data)  
             
+            # DMC loss
+            outputs = npc(feat, index)
+            loss_id, loss_fd = loss_idfd(outputs, feat, index)
+            loss_dcm = loss_id + loss_fd
+            
             shuffle_idx = torch.randperm(batch_size)
             mapping = {k:v for (v,k) in enumerate(shuffle_idx)}
             reverse_idx = torch.LongTensor([mapping[k] for k in sorted(mapping.keys())])     
@@ -162,12 +172,12 @@ def train_epoch(
             loss_cc = loss_fun(logits/cfg.TAU1, instance_labels)  
             
             output_aug, feat_aug, _ = model(data_aug) 
-            
             loss = loss_cc + loss_recon
-            logger.info("Epoch: {} Iter: {} Loss CC, Recon = {:.2f}, {:.2f}".format(cur_epoch, cur_iter, loss_cc, loss_recon))
             
             # Classification loss
-            if cur_epoch < cfg.SOLVER.WARMUP_EPOCHS:
+            if cur_epoch < cfg.SOLVER.DCM_EPOCHS:
+                loss = loss + loss_dcm
+            elif cur_epoch < cfg.SOLVER.WARMUP_EPOCHS + cfg.SOLVER.DCM_EPOCHS:
                 L = np.random.beta(cfg.ALPHA, cfg.ALPHA)   
                 L = max(L, 1-L)  
                 one_hot_labels = torch.zeros(batch_size, cfg.MODEL.NUM_CLASSES).cuda().scatter_(1, labels.view(-1,1), 1) 
@@ -182,7 +192,6 @@ def train_epoch(
                 preds_mix, _, _ = model([input_mix])  
                 loss_ce_mix = loss_fun(preds_mix, labels_mix)  
                 loss = loss + loss_ce_mix
-                logger.info("Epoch: {} Iter: {} Loss CE Mix = {:.2f}".format(cur_epoch, cur_iter, loss_ce_mix))
             else:
                 clean_idx_batch = clean_idx[index] 
                 noisy_idx_batch = ~clean_idx[index]
@@ -192,15 +201,11 @@ def train_epoch(
                 if True in clean_idx_batch.tolist():
                     loss_ce = loss_fun(preds[clean_idx_batch], target[clean_idx_batch]) + loss_fun(output_aug[clean_idx_batch], target[clean_idx_batch])
                     loss = loss + loss_ce
-                    logger.info("Epoch: {} Iter: {} Loss CE = {:.2f}".format(cur_epoch, cur_iter, loss_ce))
-                    
                 if True in noisy_idx_batch.tolist():
                     w_u = linear_rampup(cfg, cur_epoch, cfg.LAM_U)
                     probs_u = torch.softmax(output_aug[noisy_idx_batch], dim=1)
                     loss_u = torch.mean((probs_u - target[noisy_idx_batch])**2)
                     loss = loss + w_u * loss_u
-                    logger.info("Epoch: {} Iter: {} L2 Loss = {:.4f}".format(cur_epoch, cur_iter, loss_u))
-        
         loss_extra = None
         if isinstance(loss, (list, tuple)):
             loss, loss_extra = loss
@@ -507,7 +512,6 @@ def eval_epoch(
                     "Successfully saved val prediction results to {}".format(save_path)
                 )
     val_meter.reset()
-    return is_best
 
 
 def calculate_and_update_precise_bn(loader, model, num_iters=200, use_gpu=True):
@@ -672,11 +676,6 @@ def train(cfg):
     train_loader = loader.construct_loader(cfg, "train")
     eval_loader = loader.construct_loader(cfg, "eval")
     val_loader = loader.construct_loader(cfg, "val")
-    # precise_bn_loader = (
-    #     loader.construct_loader(cfg, "train", is_precise_bn=True)
-    #     if cfg.BN.USE_PRECISE_STATS
-    #     else None
-    # )
     precise_bn_loader = (
         loader.construct_loader(cfg, "eval", is_precise_bn=True)
         if cfg.BN.USE_PRECISE_STATS
@@ -709,9 +708,10 @@ def train(cfg):
     else:
         writer = None
 
-    # Declare some global variables
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    npc = NonParametricClassifier(input_dim=48, output_dim=train_loader.dataset.num_videos, tau=cfg.TAU2, momentum=0.5)
+    npc = npc.to(device)
     
-    is_best = False
     # Perform the training loop.
     logger.info("Start epoch: {}".format(start_epoch + 1))
 
@@ -788,15 +788,13 @@ def train(cfg):
             v_centers = torch.zeros(num_clusters, feat.shape[1])
             for c in range(cfg.MODEL.NUM_CLASSES):   
                 v_centers[c] = feat[v_cluster_ids == c].mean(0)    #compute v_centers as mean embeddings   
-        # Only for evaluation
-        cluster_assignment = evaluate_clustering_results(cfg, y_pred, cur_epoch, writer)
         
-        if cur_epoch >= cfg.SOLVER.WARMUP_EPOCHS:
-            if cur_epoch == cfg.SOLVER.WARMUP_EPOCHS:
+        if cur_epoch >= cfg.SOLVER.DCM_EPOCHS + cfg.SOLVER.WARMUP_EPOCHS:
+            if cur_epoch == cfg.SOLVER.DCM_EPOCHS + cfg.SOLVER.WARMUP_EPOCHS:
                 # Initalize the soft label as model's softmax prediction
                 train_loader.dataset.soft_labels = probs.clone()    
             # Generate new soft label 
-            clean_idx, hard_labels = label_clean(cfg, feat, labels, probs, train_loader, v_cluster_ids, cluster_assignment, cur_epoch, is_best)
+            clean_idx, hard_labels = label_clean(cfg, feat, labels, probs, train_loader, v_cluster_ids, cur_epoch)
             logger.info("The number of clean labels: {} at Epoch {}".format(clean_idx.sum(), cur_epoch)) 
         
         # Train for one epoch.
@@ -811,6 +809,7 @@ def train(cfg):
             cfg,
             clean_idx,
             hard_labels,
+            npc,
             writer,       
         )
         
@@ -863,7 +862,7 @@ def train(cfg):
         _ = misc.aggregate_sub_bn_stats(model)
 
         # Save a checkpoint.
-        if is_checkp_epoch and cur_epoch >= 25:
+        if is_checkp_epoch:
             cu.save_checkpoint(
                 cfg.OUTPUT_DIR,
                 model,
@@ -874,7 +873,7 @@ def train(cfg):
             )
         # Evaluate the model on validation set.
         if is_eval_epoch:
-            is_best = eval_epoch(
+            eval_epoch(
                 val_loader,
                 model,
                 val_meter,
@@ -885,7 +884,7 @@ def train(cfg):
                 scaler
             )
     if start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE: # final checkpoint load
-        is_best = eval_epoch(val_loader, model, val_meter, start_epoch, cfg, writer, optimizer, scaler)
+        eval_epoch(val_loader, model, val_meter, start_epoch, cfg, writer, optimizer, scaler)
     if writer is not None:
         writer.close()
     result_string = (
@@ -941,7 +940,7 @@ def compute_features(cfg, eval_loader, model):
             probs[index] = (prob + prob_aug) / 2
     return features, targets, probs   
 
-def label_clean(cfg, features, labels, probs, train_loader, v_cluster_ids, cluster_assignment, cur_epoch, is_best):
+def label_clean(cfg, features, labels, probs, train_loader, v_cluster_ids, cur_epoch):
     N = features.shape[0]
     num_clusters = cfg.MODEL.NUM_CLASSES
     all_score = torch.zeros(N, cfg.MODEL.NUM_CLASSES) 
@@ -1003,13 +1002,13 @@ def compute_class_weights(cfg, labels, train_loader, cur_epoch):
     class_weights = torch.zeros(cfg.MODEL.NUM_CLASSES)
     label_freq = 0
     
-    if cur_epoch  ==  cfg.SOLVER.WARMUP_EPOCHS:
+    if cur_epoch  ==  cfg.SOLVER.DCM_EPOCHS + cfg.SOLVER.WARMUP_EPOCHS:
         num_noise = noise_prop * N
         for i in range(cfg.MODEL.NUM_CLASSES):
             label_freq = len([j for j in range(labels.shape[0]) if labels[j] == i])
             class_weights[i] = -(label_freq - num_noise / (cfg.MODEL.NUM_CLASSES - 1)) / label_freq
         class_weights = (class_weights - class_weights.min()) / (class_weights.max() - class_weights.min()) + eps
-    elif cur_epoch  >  cfg.SOLVER.WARMUP_EPOCHS:
+    elif cur_epoch  >  cfg.SOLVER.DCM_EPOCHS + cfg.SOLVER.WARMUP_EPOCHS:
         max_prob, hard_labels = torch.max(train_loader.dataset.soft_labels, 1) 
         pred_clean_idx = max_prob >= 1
         for i in range(cfg.MODEL.NUM_CLASSES):
@@ -1061,55 +1060,6 @@ def gmm_fit_func(input_loss):
     prob = gmm.predict_proba(input_loss) 
     return prob, gmm
 
-class Clustering_Metrics:
-    ari = adjusted_rand_score
-    nmi = normalized_mutual_info_score
-
-    @staticmethod
-    def acc(y_true, y_pred):
-        y_true = y_true.astype(np.int64)
-        y_pred = y_pred.astype(np.int64)
-        assert y_pred.size == y_true.size
-        D = max(y_pred.max(), y_true.max()) + 1
-        w = np.zeros((D, D), dtype=np.int64)
-        for i in range(y_pred.size):
-            w[y_pred[i], y_true[i]] += 1
-        row, col = linear_sum_assignment(w.max() - w)
-        return sum([w[i, j] for i, j in zip(row, col)]) * 1.0 / y_pred.size, col
-    
-def evaluate_clustering_results(cfg, y_pred, cur_epoch, writer):
-    data_dir = cfg.DATA.PATH_TO_DATA_DIR
-    if Path(data_dir).parts[-2] == "objectlevel":
-        dist_dir = Path(data_dir).parts[-3] + "/" + Path(data_dir).parts[-2] + "/" + Path(data_dir).parts[-1] + "/train.csv"
-    else:
-        dist_dir = Path(data_dir).parts[-2] + "/" + Path(data_dir).parts[-1] + "/train.csv"
-    dir_name = Path("/cvhci/temp/lfan/label/clean_label").joinpath(Path(dist_dir))
-    
-    clean_labels = []
-    with open(dir_name, newline='') as file:
-        reader = csv.reader(file, delimiter=' ')
-        for row in reader:
-            clean_labels.append(int(row[1]))
-    clean_labels = torch.Tensor(clean_labels)
-    
-    y = np.array(clean_labels)
-    acc, col = Clustering_Metrics.acc(y, y_pred)
-    cluster_assignment = torch.from_numpy(col)
-    nmi, ari = Clustering_Metrics.nmi(y, y_pred), Clustering_Metrics.ari(y, y_pred)
-    logger.info("Epoch: {} {} clustering ACC, NMI, ARI = {:.4f}, {:.4f}, {:.4f}".format(cur_epoch + 1, cfg.CLUSTER, acc, nmi, ari))
-    
-    # write to tensorboard format if available.
-    if writer is not None:
-        writer.add_scalars(
-            {
-                "Clustering/ACC": acc,
-                "Clustering/NMI": nmi,
-                "Clustering/ARI": ari,
-            },
-            global_step=cur_epoch,
-        )
-    return cluster_assignment
-
 def linear_rampup(cfg, cur_epoch, lam_u, rampup_length=5):
-    cur = np.clip((cur_epoch - cfg.SOLVER.WARMUP_EPOCHS) / rampup_length, 0.0, 1.0)
+    cur = np.clip((cur_epoch - cfg.SOLVER.DCM_EPOCHS - cfg.SOLVER.WARMUP_EPOCHS) / rampup_length, 0.0, 1.0)
     return lam_u * float(cur)
