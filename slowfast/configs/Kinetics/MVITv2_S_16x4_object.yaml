@@ -1,15 +1,14 @@
 TRAIN:
-  ENABLE: True  # change
-  # ENABLE: False
-  DATASET: kinetics
-  # DATASET: rrl
+  # ENABLE: True # change
+  ENABLE: False
+  # DATASET: kinetics
+  DATASET: rrl
   BATCH_SIZE: 4  # change
-  EVAL_PERIOD: 5
+  EVAL_PERIOD: 2
   CHECKPOINT_PERIOD: 5
-  AUTO_RESUME: True
+  AUTO_RESUME: False
   # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/MViTv2_S_16x4_k400_f302660347.pyth  # change
-  CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/clean_label/split_1/midlevel/checkpoints/head_only_epoch_5.pyth # change
-  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_50_idfd/split_1/midlevel_fuzzyc_e30_tau0.5/checkpoints/checkpoint_best.pyth
+  CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/clean_label/split_1/objectlevel/object/checkpoints/head_only_epoch_5.pyth # change
   CHECKPOINT_EPOCH_RESET: True
   # TRAIN_HEAD_ONLY: True # change
 DATA:
@@ -17,21 +16,21 @@ DATA:
   DECODING_BACKEND: pyav
   NUM_FRAMES: 16
   SAMPLING_RATE: 4
-  # TRAIN_CROP_NUM_TEMPORAL: 2  # default 1
-  # TRAIN_CROP_NUM_SPATIAL: 1  # default 1
-  # SSL_MOCOV2_AUG: True # default false
-  # SSL_COLOR_JITTER: True # default false
-  # COLOR_RND_GRAYSCALE: 0.2 # default 0.0
-  # SSL_COLOR_HUE: 0.15
-  # SSL_COLOR_BRI_CON_SAT: [0.6, 0.6, 0.6] # default [0.4, 0.4, 0.4]
+  TRAIN_CROP_NUM_TEMPORAL: 2  # default 1
+  TRAIN_CROP_NUM_SPATIAL: 1  # default 1
+  SSL_MOCOV2_AUG: True # default false
+  SSL_COLOR_JITTER: True # default false
+  COLOR_RND_GRAYSCALE: 0.2 # default 0.0
+  SSL_COLOR_HUE: 0.15
+  SSL_COLOR_BRI_CON_SAT: [0.6, 0.6, 0.6] # default [0.4, 0.4, 0.4]
   TRAIN_JITTER_SCALES: [256, 320]
   TRAIN_CROP_SIZE: 224
   TEST_CROP_SIZE: 224
   INPUT_CHANNEL_NUM: [3]
-  PATH_TO_DATA_DIR: /cvhci/temp/lfan/label/noisy_70/split_1/midlevel  # change
+  PATH_TO_DATA_DIR: /cvhci/temp/lfan/label/noisy_50/split_1/objectlevel/object  # change
   PATH_PREFIX: /cvhci/temp/lfan/clip  # change
-  TRAIN_JITTER_SCALES_RELATIVE: [0.08, 1.0]
-  # TRAIN_JITTER_SCALES_RELATIVE: [0.2, 0.766]  # Change to ssl mode
+  # TRAIN_JITTER_SCALES_RELATIVE: [0.08, 1.0]
+  TRAIN_JITTER_SCALES_RELATIVE: [0.2, 0.766]  # Change to ssl mode
   TRAIN_JITTER_ASPECT_RELATIVE: [0.75, 1.3333]
 MVIT:
   ZERO_DECAY_POS_CLS: False
@@ -59,7 +58,7 @@ MVIT:
   DIM_MUL_IN_ATT: True
   RESIDUAL_POOLING: True
 AUG:
-  NUM_SAMPLE: 2
+  NUM_SAMPLE: 1
   ENABLE: True
   COLOR_JITTER: 0.4
   AA_TYPE: rand-m7-n4-mstd0.5-inc1
@@ -69,7 +68,7 @@ AUG:
   RE_COUNT: 1
   RE_SPLIT: False
 MIXUP:
-  ENABLE: False
+  ENABLE: False # change
   ALPHA: 0.8
   CUTMIX_ALPHA: 1.0
   PROB: 1.0
@@ -82,28 +81,26 @@ SOLVER:
   BASE_LR: 1e-4  # change
   COSINE_AFTER_WARMUP: True
   COSINE_END_LR: 1e-6
-  WARMUP_START_LR: 5e-5 # change
-  WARMUP_EPOCHS: 0.0 # change
+  WARMUP_START_LR: 5e-5
+  WARMUP_EPOCHS: 5.0 # change
   LR_POLICY: cosine
-  MAX_EPOCH: 25  # change
+  MAX_EPOCH: 35  # change
   MOMENTUM: 0.9
   WEIGHT_DECAY: 0.05  
   OPTIMIZING_METHOD: adamw
 MODEL:
-  NUM_CLASSES: 34  # change
+  NUM_CLASSES: 17  # change
   ARCH: mvit
   MODEL_NAME: MViT
   LOSS_FUNC: soft_cross_entropy
+  # LOSS_FUNC: elr_loss
   # LOSS_FUNC: cdr
-  DROPOUT_RATE: 0.5  # default 0.5
-  BETA: 0.5
-  LAM: 0.0
-# CLUSTER: kmeans
-CLUSTER: agglomerative
-# CLUSTER: spectral
+  DROPOUT_RATE: 0.5
+BETA: 0.5
+LAM: 1.0
 # CLUSTER: fuzzyc
-SAMPLE_SELECTION: soft_label
-# SAMPLE_SELECTION: jsd
+CLUSTER: agglomerative
+SAMPLE_SELECTION: soft_label_weighted_threshold
 TEST:
   ENABLE: True # change
   DATASET: kinetics
@@ -111,16 +108,15 @@ TEST:
   BATCH_SIZE: 4  # change
   NUM_SPATIAL_CROPS: 1
   NUM_ENSEMBLE_VIEWS: 5
-  SAVE_RESULTS_PATH: test_pred.csv
-  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_50_crl/split_1/midlevel_from_idfd_soft_labels_clwe_lam0.0_l2noise_w5e35_mixup/checkpoints/checkpoint_best.pyth
-  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_50_crl/split_0/midlevel_gmm_or_soft_labels_gt_class_weights_lam0.0_l2noise_0.5beta_wcm0/checkpoints/checkpoint_epoch_00030.pyth
+  # SAVE_RESULTS_PATH: test_pred.dat
+  CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_50_elr/split_1/objectlevel/object/checkpoints/checkpoint_epoch_00025.pyth
 DATA_LOADER:
   NUM_WORKERS: 4  
   PIN_MEMORY: True
 NUM_GPUS: 1  
 NUM_SHARDS: 1
 RNG_SEED: 0
-OUTPUT_DIR: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_70/split_1/midlevel
+OUTPUT_DIR: /cvhci/temp/lfan/mvitv2/checkpoint/noisy_50_elr/split_1/objectlevel/object
 TENSORBOARD:
   ENABLE: True
-# TASK: TSNE 
+# TASK: TSNE # Visualize the resultant embeddings by t-SNE

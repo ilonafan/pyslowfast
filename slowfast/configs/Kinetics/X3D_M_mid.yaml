@@ -7,7 +7,7 @@ TRAIN:
   CHECKPOINT_PERIOD: 5
   AUTO_RESUME: True
   # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/checkpoint/x3d_m.pyth # change
-  CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/checkpoint/clean_label/split_0/midlevel_head_only/checkpoints/checkpoint_epoch_00005.pyth
+  CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/DAD/clean_label/binary/checkpoints/head_only_epoch_5.pyth
   # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/checkpoint/noisy_50_idfd/split_2/midlevel_fuzzyc_tau0.5_e30/checkpoints/checkpoint_best.pyth
   CHECKPOINT_EPOCH_RESET: True
   # TRAIN_HEAD_ONLY: True # change
@@ -27,11 +27,14 @@ TEST:
   # NUM_SPATIAL_CROPS: 3
   NUM_ENSEMBLE_VIEWS: 5
   SAVE_RESULTS_PATH: test_pred.csv
-  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/checkpoint/noisy_50_crl/split_2/midlevel_from_idfd_soft_labels_per_class_clwe_lam0.0_l2noise_w5e35/checkpoints/checkpoint_best.pyth
+  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/checkpoint/noisy_50_crl/split_1/midlevel_from_idfd_soft_labels_per_class_clwe_lam0.0_l2noise_w5e35/checkpoints/checkpoint_best.pyth
+  # CHECKPOINT_FILE_PATH: /cvhci/temp/lfan/x3d/DAD/clean_label/head_only/checkpoints/checkpoint_epoch_00005.pyth
 DATA:
   DECODING_BACKEND: pyav
-  PATH_TO_DATA_DIR: /cvhci/temp/lfan/label/noisy_70/split_0/midlevel  # change
-  PATH_PREFIX: /cvhci/temp/lfan/clip  # change
+  # PATH_TO_DATA_DIR: /cvhci/temp/lfan/label/noisy_50/split_1/midlevel  # change
+  # PATH_PREFIX: /cvhci/temp/lfan/clip  # change
+  PATH_TO_DATA_DIR: /lsdf/data/activity/DAD/label/clean_label/binary  # change
+  PATH_PREFIX: /lsdf/data/activity/DAD/video_t/clips  # change
   NUM_FRAMES: 16
   SAMPLING_RATE: 5
   TRAIN_JITTER_SCALES: [256, 320]
@@ -48,7 +51,7 @@ DATA:
   # SSL_COLOR_HUE: 0.15
   # SSL_COLOR_BRI_CON_SAT: [0.6, 0.6, 0.6] # default [0.4, 0.4, 0.4]
 AUG:
-  NUM_SAMPLE: 1  # change
+  NUM_SAMPLE: 2  # change
   ENABLE: True  # change
   COLOR_JITTER: 0.4
   AA_TYPE: rand-m7-n4-mstd0.5-inc1
@@ -66,7 +69,7 @@ BN:
   NUM_BATCHES_PRECISE: 200
   WEIGHT_DECAY: 0.0
 SOLVER:
-  BASE_LR: 1e-4 # 1 machine
+  BASE_LR: 0.01 # 1 machine
   BASE_LR_SCALE_NUM_SHARDS: True
   LR_POLICY: cosine
   MAX_EPOCH: 25
@@ -75,26 +78,25 @@ SOLVER:
   WARMUP_START_LR: 5e-5
   OPTIMIZING_METHOD: sgd
 MODEL:
-  NUM_CLASSES: 34
+  NUM_CLASSES: 2
   ARCH: x3d
   MODEL_NAME: X3D
   LOSS_FUNC: cross_entropy
-  # LOSS_FUNC: cdr
+  # LOSS_FUNC: elr_loss
   DROPOUT_RATE: 0.5
 BETA: 0.5
 LAM: 0.0
 CLUSTER: agglomerative
 # CLUSTER: fuzzyc
 SAMPLE_SELECTION: soft_label
-NOISE_PROP: 0.7
+NOISE_PROP: 0.5
 LAM_U: 50
-# TAU: 0.5
-# TAU2: 2.0
 DATA_LOADER:
   NUM_WORKERS: 4
   PIN_MEMORY: True
 NUM_GPUS: 1
 RNG_SEED: 0
-OUTPUT_DIR: /cvhci/temp/lfan/x3d/checkpoint/noisy_70/split_0/midlevel_x3dm
+OUTPUT_DIR: /cvhci/temp/lfan/x3d/DAD/clean_label/binary
 TENSORBOARD:
   ENABLE: True
+# TASK: TSNE
