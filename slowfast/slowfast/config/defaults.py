@@ -1046,6 +1046,9 @@ _C.SOLVER.NESTEROV = True
 # L2 regularization.
 _C.SOLVER.WEIGHT_DECAY = 1e-4
 
+# Number of epochs for unsupervised clustering-friendly represenation learning.
+_C.SOLVER.DCM_EPOCHS = 0.0
+
 # Start the warm up from SOLVER.BASE_LR * SOLVER.WARMUP_FACTOR.
 _C.SOLVER.WARMUP_FACTOR = 0.1
 
