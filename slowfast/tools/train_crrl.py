@@ -27,10 +27,7 @@ from slowfast.utils.env import pathmgr
 from slowfast.datasets import loader
 from slowfast.datasets.mixup import MixUp
 from slowfast.models import build_model
-from slowfast.models.contrastive import (
-    contrastive_forward,
-    contrastive_parameter_surgery,
-)
+from slowfast.models.contrastive import contrastive_parameter_surgery
 from slowfast.utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter
 from slowfast.utils.multigrid import MultigridSchedule
 from sklearn.mixture import GaussianMixture
@@ -976,17 +973,9 @@ def label_clean(cfg, features, labels, probs, train_loader, v_cluster_ids, clust
     prob_jsd, gmm_jsd = gmm_fit_func(jsd.reshape(-1, 1))
     fst_gt_clean = prob_jsd[:, gmm_jsd.means_.argmin()] > prob_jsd[:, gmm_jsd.means_.argmax()]
     
-    if cfg.SAMPLE_SELECTION == 'soft_label':
-        class_weights = compute_class_weights(cfg, labels, train_loader, cur_epoch)   
-        cluster_th = compute_cluster_threshold(cfg, v_cluster_ids, train_loader, class_weights)  
-    elif cfg.SAMPLE_SELECTION == 'soft_label_gt_class_weights':
-        class_weights = compute_gt_class_weights(cfg, labels)
-        cluster_th = compute_cluster_threshold(cfg, v_cluster_ids, train_loader, class_weights)
-    elif cfg.SAMPLE_SELECTION == 'soft_label_wo_class_weights':
-        class_weights = torch.ones(cfg.MODEL.NUM_CLASSES)
-        cluster_th = compute_cluster_threshold_wo_class_weights(cfg, v_cluster_ids, train_loader)
-    
     # Compute weighted refined scores and divide dateset by second criterion
+    class_weights = compute_class_weights(cfg, labels, train_loader, cur_epoch)   
+    cluster_th = compute_cluster_threshold(cfg, v_cluster_ids, train_loader, class_weights)  
     weighted_scores = class_weights[labels] * refined_scores[labels>=0,labels]
     sec_gt_clean =  weighted_scores >= cluster_th[v_cluster_ids][labels>=0,labels]
         
@@ -1005,39 +994,6 @@ def label_clean(cfg, features, labels, probs, train_loader, v_cluster_ids, clust
     max_prob, hard_labels = torch.max(train_loader.dataset.soft_labels, 1) 
     clean_idx = max_prob >= 1
     
-    # Write val predictions into file      
-    if cur_epoch == cfg.SOLVER.MAX_EPOCH - 1:
-        save_path = os.path.join(cfg.OUTPUT_DIR, "pseudo_labels.dat")
-        if du.is_root_proc():
-            with pathmgr.open(save_path, "wb") as f:
-                pickle.dump([clean_idx.tolist(), 
-                            refined_scores.tolist(), 
-                            hard_labels.tolist(), 
-                            gt_score.tolist(), 
-                            train_loader.dataset.soft_labels.tolist(), 
-                            v_cluster_ids.tolist(), 
-                            fst_gt_clean.tolist(), 
-                            sec_gt_clean.tolist(), 
-                            class_weights.tolist()], f)
-        logger.info(
-            "Successfully saved pseudo labels to {}".format(save_path)
-        )
-    if is_best:
-        save_path = os.path.join(cfg.OUTPUT_DIR, "pseudo_labels_best.dat")
-        if du.is_root_proc():
-            with pathmgr.open(save_path, "wb") as f:
-                pickle.dump([clean_idx.tolist(), 
-                            refined_scores.tolist(), 
-                            hard_labels.tolist(), 
-                            gt_score.tolist(), 
-                            train_loader.dataset.soft_labels.tolist(), 
-                            v_cluster_ids.tolist(), 
-                            fst_gt_clean.tolist(), 
-                            sec_gt_clean.tolist(), 
-                            class_weights.tolist()], f)
-        logger.info(
-            "Successfully saved pseudo labels to {}".format(save_path)
-        )
     return clean_idx, hard_labels
 
 def compute_class_weights(cfg, labels, train_loader, cur_epoch):
@@ -1062,33 +1018,6 @@ def compute_class_weights(cfg, labels, train_loader, cur_epoch):
         class_weights = (class_weights - class_weights.min()) / (class_weights.max() - class_weights.min()) + eps
     return class_weights
 
-def compute_gt_class_weights(cfg, noisy_labels):
-    clean_labels = []
-    data_dir = cfg.DATA.PATH_TO_DATA_DIR
-    dist_dir = Path(data_dir).parts[-2] + "/" + Path(data_dir).parts[-1] + "/train.csv"
-    dir_name = Path("/cvhci/temp/lfan/label/clean_label").joinpath(Path(dist_dir))
-    
-    with open(dir_name, newline='') as file:
-        reader = csv.reader(file, delimiter=' ')
-        for row in reader:
-            clean_labels.append(int(row[1]))
-    clean_labels = torch.Tensor(clean_labels)
-    
-    clean_labels_result = torch.zeros(cfg.MODEL.NUM_CLASSES)
-    noisy_labels_result = torch.zeros(cfg.MODEL.NUM_CLASSES)
-    purity_per_classes = torch.zeros(cfg.MODEL.NUM_CLASSES)
-    
-    num_clusters = cfg.MODEL.NUM_CLASSES
-    for i in range(num_clusters):
-        clean_labels_result[i] = len([j for j in range(clean_labels.shape[0]) if clean_labels[j] == i])
-        noisy_labels_result[i] = len([j for j in range(noisy_labels.shape[0]) if noisy_labels[j] == i])
-        purity_per_classes[i] = clean_labels_result[i] * 0.5  / noisy_labels_result[i]
-    
-    purity_per_classes = -purity_per_classes
-    gt_class_weights = (purity_per_classes - purity_per_classes.min()) / (purity_per_classes.max() - purity_per_classes.min()) + 0.05
-    
-    return gt_class_weights
-
 def compute_cluster_threshold(cfg, v_cluster_ids, train_loader, class_weights):
     num_clusters = cfg.MODEL.NUM_CLASSES
     cw_sum = sum(class_weights) / num_clusters - 0.05
@@ -1097,15 +1026,6 @@ def compute_cluster_threshold(cfg, v_cluster_ids, train_loader, class_weights):
         cluster_mean = torch.mean(train_loader.dataset.soft_labels[v_cluster_ids == i])
         cluster_th[i] = cw_sum * cluster_mean
     return cluster_th
-
-def compute_cluster_threshold_wo_class_weights(cfg, v_cluster_ids, train_loader):
-    num_clusters = cfg.MODEL.NUM_CLASSES
-    cluster_th = torch.zeros((num_clusters, train_loader.dataset.soft_labels.shape[1]))
-    for i in range(num_clusters):
-        cluster_mean = torch.mean(train_loader.dataset.soft_labels[v_cluster_ids == i])
-        cluster_th[i] = cfg.LAM * cluster_mean
-    return cluster_th
-
 
 def pairwise_distance(data1, data2):
     if torch.cuda.is_available():
@@ -1123,10 +1043,8 @@ def pairwise_distance(data1, data2):
     dis = dis.sum(dim=-1).squeeze()
     return dis
 
-
 def kl_divergence(p, q):
     return (p * ((p+1e-10) / (q+1e-10)).log()).sum(dim=1)
-
 
 class Jensen_Shannon(torch.nn.Module):
     def __init__(self):
