@@ -1,17 +1,32 @@
-# Action Recognition with Noisy Labels
+<!-- ## Updates
 
-This is the repository for the CV:HCI practical course with topic "**Action Recognition with Noisy Labels**". In this repository, you can find the implementation based on [MViTv2](https://github.com/facebookresearch/SlowFast) model. 
+- [2021.09.17] Code for flying guide dog prototype and the Pedestrian and Vehicle Traffic Lights (PVTL) dataset are released. -->
+
+# Exploring Video-Based Driver Activity Recognition under Noisy Labels
+
+PyTorch implementation of paper "**Exploring Video-Based Driver Activity Recognition under Noisy Labels**".
+
+
+## Overview
+
+- `detectron2_repo/`: Detectron2 repository
+- `slowfast/`
+    - `config/`: Config yaml files for different experiments
+    - `scripts/`: Script ipynb files for dataset preparation and result visualization
+    - `slowfast/`: Implementations
+        - `config/default.py`: Default config
+        - `datasets/`: Implementations of datasets
+        - `models/`: Implementations of models
+        - `utils/`: Helper functions
+  - `tools/`: Scripts for training/validation/testing
 
 ## Dependencies
-
-We implement our methods by PyTorch on Quadro RTX 6000 and 8000 GPU. The environment is as bellow:
 
 - [Python](https://python.org/), version = 3.10
 - [Ubuntu 16.04 Desktop](https://ubuntu.com/download)
 - [PyTorch](https://PyTorch.org/), version = 1.12.1
 - [CUDA](https://developer.nvidia.com/cuda-downloads), version = 11.6
 - [Anaconda3](https://www.anaconda.com/)
-
 
 ## Installation
 
@@ -36,19 +51,9 @@ python tools/run_net.py \
 To perform test, you can set the TRAIN.ENABLE to False, and do not forget to pass the path to the model you want to test to TEST.CHECKPOINT_FILE_PATH.
 
 
-## Visualization
+## Acknowledgements
 
-To visualize the resultant embeddings of your model, you can first perform test and set the TASK to TSNE and save the output csv file.
+Great thanks for these open-source repositories: 
 
-Here is an example: 
-```bash
-python tools/run_net.py \
-  --cfg configs/Kinetics/MViTv2_S_16x4.yaml \
-  DATA.PATH_TO_DATA_DIR path_to_your_dataset \
-  TEST.CHECKPOINT_FILE_PATH path_to_your_checkpoint \
-  TRAIN.ENABLE False \
-  TASK T-SNE\
-```
-
-Then you can run the [tsne.ipynb](slowfast/script/tsne.ipynb) to visualiza them in 2D or 3D via t-SNE.
+- PySlowFast: [PySlowFast](https://github.com/facebookresearch/SlowFast)
 
