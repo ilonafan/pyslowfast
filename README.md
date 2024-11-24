@@ -43,7 +43,7 @@ To generate noise labels, you can run the [generate_noisy_label.ipynb](slowfast/
 
 Here is a training example: 
 ```bash
-python tools/run_net.py \
+python tools/run.py \
   --cfg configs/Kinetics/MViTv2_S_16x4.yaml \
   DATA.PATH_TO_DATA_DIR path_to_your_dataset \
 ```
